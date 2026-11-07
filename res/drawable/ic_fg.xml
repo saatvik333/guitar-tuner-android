@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="@color/ic_disc"
+        android:pathData="M54,30a24,24 0 1,0 0.001,0z" />
+    <!-- dial, broken around the target ring at twelve o'clock -->
+    <path android:strokeColor="@color/ic_bg" android:strokeWidth="1.8"
+        android:strokeLineCap="round" android:fillColor="#00000000"
+        android:pathData="M59.28,44.35A11,11 0 1,1 48.72,44.35" />
+    <!-- target ring, and the bead closing in from the sharp side -->
+    <path android:strokeColor="@color/ic_bg" android:strokeWidth="1.5"
+        android:fillColor="#00000000"
+        android:pathData="M50.2,43a3.8,3.8 0 1,0 7.6,0a3.8,3.8 0 1,0 -7.6,0z" />
+    <path android:fillColor="@color/ic_bg"
+        android:pathData="M58.27,45.57a2.8,2.8 0 1,0 5.6,0a2.8,2.8 0 1,0 -5.6,0z" />
+</vector>
