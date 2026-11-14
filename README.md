@@ -67,9 +67,10 @@ describe this phone only.
       MainActivity.java  permission, lifecycle, settings storage
       Settings.java      the saved settings
     hairline/            the design system: Palette (tokens with derived contrast tokens), Kit
-                         (drawing primitives), SettingsPage, Hits, Motion, Access (virtual nodes,
-                         keyboard), Chrome (edge to edge, bars, insets, back, fonts), Themes (built-ins
-                         and Material You Wallpaper), Rubik, and the AWT stubs for the JVM preview
+                         (drawing primitives), SettingsPage, Frame, Hits, Motion, Stage (the view:
+                         frame loop, touch, themes, haptics, back), Access (virtual nodes, keyboard),
+                         Chrome (edge to edge, bars, insets, fonts), Themes (built-ins, Material You
+                         Wallpaper, high contrast), Rubik, and the AWT stubs for the JVM preview
     tools/preview/       Preview renders Renderer on the JVM; EngineTest, GuideTest
     tools/               make_icons.py, make_feature_graphic.py, store_screenshots.sh and pluck.py (Build)
     fastlane/            Play Store text, changelogs and graphics
@@ -276,12 +277,16 @@ For someone tuning for the first time.
   system's predictive back-to-home animation plays at the top level.
 - Accessibility: every control is a virtual node (hairline's `Access`) with a role and state:
   settings options are radio buttons, the settings switches and the tone, pause, Advanced and Auto
-  switch buttons are switches. The dial (or the guide's meter) is a polite live region reading
-  the note, string and whole cents at most every 1.5 s; reaching pitch is announced. A microphone
-  message is a readable node (with its action, if any); silence starting and a refused permission
-  are announced. Contrast: text 4.5:1, indicators and focus ring 3:1 in every theme. Text follows
-  the system font scale up to 1.3x; larger settings render at 1.3x so the custom layouts keep
-  fitting. Keyboard and D-pad: arrows move focus spatially, Tab in reading order, Enter or Space
+  switch buttons are switches. Nothing is spoken that is not on screen: a tab or settings names
+  itself as it opens (pane title); the dial, the guide's meter, or the message shown in their
+  place (microphone, silence, a reference tone that could not play) is a polite live region,
+  saying the note, string and whole cents, reaching pitch, a strum's result or the guide's step at
+  most every 1.5 s; a control whose words change is re-read while focused. Contrast: text 4.5:1,
+  indicators and focus ring 3:1 in every theme, more under the system's high-contrast setting.
+  Text on the tabs follows the system font scale up to 1.3x so the custom layouts keep fitting;
+  the settings list follows it fully, wrapping. Animations follow the system's animation scale;
+  with animations off, the pulse, shake, pluck demonstration and string wobble do not play.
+  Keyboard and D-pad: arrows move focus spatially, Tab in reading order, Enter or Space
   activates (held on a reference-pitch chevron, it repeats), Esc backs out.
 
 ## License

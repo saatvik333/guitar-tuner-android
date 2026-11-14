@@ -6,7 +6,7 @@ Everything Play Console asks for, with the answer to give. The store text and gr
 ## 1. Build the upload
 
     ./build.sh                                       # build/Tuner.aab
-    VERSION_CODE=2 VERSION_NAME=1.0.1 ./build.sh     # every later upload needs a higher VERSION_CODE
+    VERSION_CODE=3 VERSION_NAME=1.1.1 ./build.sh     # every later upload needs a higher VERSION_CODE
 
 The bundle is signed with the **upload key** at `~/.local/share/guitar-tuner-android/upload.jks`
 (alias `upload`, password in the desktop keyring under `service guitar-tuner-android key upload-keystore`;

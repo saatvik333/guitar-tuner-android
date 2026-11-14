@@ -92,7 +92,7 @@ final class Renderer {
         headerCy = ui.insetT + (tight ? 26f : 32f) * dp;
         barCy = ui.height - ui.insetB - (tight ? 30f : 40f) * dp;
         Palette p = ui.pal;
-        k.begin(ui.hits, p, dp, sp);
+        k.begin(ui);
         c.drawColor(p.bg);
 
         // Two tabs under one bottom bar: Easy (the strings, home) and Advanced (the dial). They
@@ -902,11 +902,12 @@ final class Renderer {
 
         float bx = cx + u.bead * (w / 2f - br - 2f * dp);
         if (u.gChevT > 0.001f && u.noteT > 0.001f) {
-            // chevrons march from the bead toward the target: which way to go, and how far
+            // chevrons march from the bead toward the target: which way to go, and how far; they
+            // stand still without animations
             int dir = bx < cx ? 1 : -1;
             float from = bx + dir * (br + 9f * dp), span = (cx - dir * (tr + 9f * dp) - from) * dir;
             float step = 13f * dp, speed = (16f + 34f * Math.abs(u.bead)) * dp;
-            float off = (u.time * speed) % step;
+            float off = u.motion > 0f ? (u.time * speed) % step : step / 2f;
             for (float d = off; d < span; d += step) {
                 float fadeIn = Math.min(1f, d / (8f * dp)), fadeOut = Math.min(1f, (span - d) / (8f * dp));
                 k.chevron(c, from + dir * d, my, dir, 4f * dp, 1.5f * dp,

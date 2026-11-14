@@ -1,17 +1,18 @@
 package me.saatvik.tuner;
 
-import me.saatvik.hairline.Hits;
-import me.saatvik.hairline.Palette;
-import me.saatvik.hairline.SettingsPage;
+import me.saatvik.hairline.Frame;
 
-/** Everything the renderer needs for one frame. Written by TunerView, read by Renderer. */
-final class Ui {
+/**
+ * Everything the renderer needs for one frame: the shared {@link Frame} (metrics, insets, theme,
+ * targets, settings list) and the tuner's own state. Written by TunerView, read by Renderer.
+ */
+final class Ui extends Frame {
     static final int MAX_STRINGS = 8;
 
-    float dp = 1f, sp = 1f;
-    int width, height, insetL, insetT, insetR, insetB;
+    Ui() {
+        super(48);
+    }
 
-    Palette pal = Palette.BUILT_IN[0];
     float pageT;                 // 0 = tuner, 1 = settings
 
     // dial
@@ -55,10 +56,6 @@ final class Ui {
     float tolPos, needlePos, namesPos;
     boolean haptics, keepOn;
     float hapticsT, keepOnT;
-    Palette[] themes = {};
-    int themeIdx;
-    /** Built by Renderer each frame it is drawn; scrolled by TunerView. */
-    final SettingsPage page = new SettingsPage();
 
     // strum check and suggestions on the dial
     boolean readCheck;           // all strings in tune: a check where the note goes
@@ -87,7 +84,4 @@ final class Ui {
     float gShakeT = -1f;         // "other way" shake, 0..1; -1 = idle
     float gDoneT;                // completion mark
     float time;                  // seconds, for loops
-
-    // interaction: targets, written by Renderer each frame; pressed and focused by TunerView
-    final Hits hits = new Hits(48);
 }

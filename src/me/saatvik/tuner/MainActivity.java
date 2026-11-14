@@ -12,8 +12,6 @@ import android.os.Handler;
 import android.os.Looper;
 
 import me.saatvik.hairline.Chrome;
-import me.saatvik.hairline.Palette;
-import me.saatvik.hairline.Themes;
 
 public final class MainActivity extends Activity implements TunerView.Host, AudioInput.Sink, ToneSynth.Listener {
 
@@ -29,7 +27,6 @@ public final class MainActivity extends Activity implements TunerView.Host, Audi
     private final Handler main = new Handler(Looper.getMainLooper());
     private boolean started, askedThisLaunch, blocked;
     private boolean rationaleBefore;                // shouldShowRequestPermissionRationale at request time
-    private Chrome.Back back;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -47,12 +44,10 @@ public final class MainActivity extends Activity implements TunerView.Host, Audi
 
         audio = new AudioInput(this);
         view = new TunerView(this, new Renderer(Chrome.font(getAssets(), 300), Chrome.font(getAssets(), 400)),
-                settings, Themes.all(this), this);
-        back = new Chrome.Back(this, view);
+                settings, this);
         if (state != null) view.restoreState(state);
         setContentView(view);
         Chrome.edgeToEdge(getWindow());
-        onThemeApplied(view.currentTarget());
     }
 
     @Override
@@ -112,7 +107,7 @@ public final class MainActivity extends Activity implements TunerView.Host, Audi
         boolean refusedBefore = device.getBoolean("micRefused", false);
         if (after && !refusedBefore) device.edit().putBoolean("micRefused", true).apply();
         blocked = !after && (rationaleBefore || refusedBefore);
-        view.micRefused(blocked ? TunerView.MIC_BLOCKED : TunerView.MIC_NEED);
+        view.setMic(blocked ? TunerView.MIC_BLOCKED : TunerView.MIC_NEED);
     }
 
     private void requestMic() {
@@ -133,12 +128,6 @@ public final class MainActivity extends Activity implements TunerView.Host, Audi
         super.onWindowFocusChanged(hasFocus);
         int m = view.mic();
         if (hasFocus && started && (m == TunerView.MIC_NEED || m == TunerView.MIC_BLOCKED) && hasMic()) micGranted();
-    }
-
-    @Override
-    public void onAttachedToWindow() {
-        super.onAttachedToWindow();
-        onThemeApplied(view.currentTarget());   // Android 11 can drop bar appearance set before attach
     }
 
     private boolean hasMic() {
@@ -238,22 +227,14 @@ public final class MainActivity extends Activity implements TunerView.Host, Audi
         });
     }
 
-    // ---- back and window ---------------------------------------------------------------------
+    // ---- back --------------------------------------------------------------------------------
 
-    /** Before Android 13: legacy back dispatch. */
+    /**
+     * Before Android 13: legacy back dispatch. From 13 the view registers for back while it has
+     * something to close (settings page, reference tone, Advanced).
+     */
     @Override
     public void onBackPressed() {
         if (!view.back()) super.onBackPressed();
-    }
-
-    /** Android 13+: back reaches the view only while it has something to close (settings page, reference tone, Advanced). */
-    @Override
-    public void setBackIntercept(boolean on) {
-        back.intercept(on);
-    }
-
-    @Override
-    public void onThemeApplied(Palette p) {
-        Chrome.theme(getWindow(), p);
     }
 }

@@ -13,7 +13,8 @@ import me.saatvik.hairline.Palette;
 /**
  * Renders the production Renderer on the JVM (AWT-backed android.graphics stubs from
  * hairline/preview) for visual review: a 412 x 914 dp phone, plus small windows (split screen,
- * narrow phone at large font, landscape), the keyboard focus ring, and the settings page in every theme.
+ * narrow phone at large font, landscape), the keyboard focus ring, the settings page in every
+ * theme, the system font at 2x and the system's high-contrast setting.
  */
 public final class Preview {
     static final float DENSITY = 2.625f;
@@ -291,6 +292,47 @@ public final class Preview {
         u.gChevT = 0f;
         shot(r, u, out + "/g19_too_high_split.png");
 
+        // a reference tone that could not play: shown in place of the readout, on either tab
+        u = phone("Ambra", "Standard");
+        u.message = "Reference tone unavailable";
+        shot(r, u, out + "/14_ambra_tone_failed.png");
+        u = guide(phone("Ambra", "Standard"), 1, Guide.WAIT, 0);
+        u.message = "Reference tone unavailable";
+        shot(r, u, out + "/g20_tone_failed.png");
+
+        // the system font at 2x: the settings list follows it fully, the tabs stay capped at 1.3x
+        u = sized("Rosa", "Standard", 320, 569, 2f, 2f, 24, 48);
+        settings(u);
+        shot(r, u, out + "/x1_2x_settings.png");
+        u = sized("Rosa", "Standard", 320, 569, 2f, 2f, 24, 48);
+        settings(u);
+        u.page.scroll = 1e9f;
+        shot(r, u, out + "/x2_2x_settings_end.png");
+        u = guide(sized("Aurum", "Standard", 320, 569, 2f, 2f, 24, 48), 2, Guide.LOOSEN, Guide.OFF);
+        reading(u, 35f, 0.5f);
+        shot(r, u, out + "/x3_2x_guide.png");
+        u = sized("Celeste", "Half step down", 320, 569, 2f, 2f, 24, 48);
+        live(u, 'A', 2, "2", -14f, "String 5", "Tune up", "102.97 Hz");
+        u.sTargetT[1] = 1f;
+        shot(r, u, out + "/x4_2x_live.png");
+
+        // the system's high-contrast setting
+        u = phone("Celeste", "Standard");
+        contrasted(u);
+        settings(u);
+        shot(r, u, out + "/c1_contrast_settings.png");
+        u = phone("Aurum", "Standard");
+        contrasted(u);
+        live(u, 'A', 0, "2", 0.4f, "String 5", "In tune", "110.03 Hz");
+        u.tuneT = 1f; u.hintAccent = true; u.sTargetT[1] = 1f; u.sTunedT[0] = 1f; u.sTunedT[1] = 1f;
+        shot(r, u, out + "/c2_contrast_in_tune.png");
+        u = phone("Salvia", "Standard");
+        contrasted(u);
+        guide(u, 3, Guide.TIGHTEN, Guide.OFF);
+        u.sTunedT[0] = 1f; u.sTunedT[1] = 1f; u.sTunedT[2] = 1f;
+        reading(u, -42f, 0.5f);
+        shot(r, u, out + "/c3_contrast_guide.png");
+
         if (args.length > 2) motion(r, args[2]);
     }
 
@@ -438,6 +480,13 @@ public final class Preview {
         u.bead = Renderer.beadOf(cents);
     }
 
+    static void contrasted(Ui u) {
+        Palette[] t = new Palette[u.themes.length];
+        for (int i = 0; i < t.length; i++) t[i] = u.themes[i].contrasted();
+        u.themes = t;
+        u.pal = t[u.themeIdx];
+    }
+
     static void settings(Ui u) {
         u.pageT = 1f;
         u.a4Label = "A4 = 440 Hz";
@@ -452,8 +501,7 @@ public final class Preview {
 
     static Ui sized(String theme, String tuning, int wDp, int hDp, float density, float font, int topDp, int bottomDp) {
         Ui u = new Ui();
-        u.dp = density;
-        u.sp = density * font;
+        u.textScale(density, font);
         u.width = Math.round(wDp * density);
         u.height = Math.round(hDp * density);
         u.insetT = Math.round(topDp * density);

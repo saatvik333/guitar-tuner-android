@@ -30,8 +30,8 @@ command -v "$BUNDLETOOL" >/dev/null || { echo "error: bundletool not on PATH (or
 
 MIN_SDK=24
 TARGET_SDK=36
-VERSION_CODE=${VERSION_CODE:-1}
-VERSION_NAME=${VERSION_NAME:-1.0.0}
+VERSION_CODE=${VERSION_CODE:-2}
+VERSION_NAME=${VERSION_NAME:-1.1.0}
 KS=${KEYSTORE:-${XDG_DATA_HOME:-$HOME/.local/share}/guitar-tuner-android/upload.jks}
 KS_ALIAS=${KEYSTORE_ALIAS:-upload}
 OUT=build

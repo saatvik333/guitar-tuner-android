@@ -2,47 +2,32 @@ package me.saatvik.tuner;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Rect;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.util.DisplayMetrics;
-import android.util.TypedValue;
-import android.view.HapticFeedbackConstants;
-import android.view.KeyEvent;
-import android.view.MotionEvent;
-import android.view.View;
-import android.view.ViewConfiguration;
-import android.view.WindowInsets;
-import android.view.accessibility.AccessibilityNodeProvider;
 
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import me.saatvik.hairline.Access;
-import me.saatvik.hairline.Chrome;
 import me.saatvik.hairline.Hits;
-import me.saatvik.hairline.Kit;
 import me.saatvik.hairline.Motion;
 import me.saatvik.hairline.Palette;
-import me.saatvik.hairline.Themes;
+import me.saatvik.hairline.Stage;
 
 /**
- * Owns animation state and input; delegates drawing to {@link Renderer}, accessibility and keys to
- * {@link Access}. Pitch frames arrive from the capture thread through {@link #offer} and are
- * drained on the UI thread into the {@link Tracker}; a frame is drawn only when something visible changed.
+ * The tuner's state, animation and actions on a hairline {@link Stage} (which owns the frame loop,
+ * input, accessibility, themes and back); drawing is {@link Renderer}'s. Pitch frames arrive from
+ * the capture thread through {@link #offer} and are drained on the UI thread into the
+ * {@link Tracker}; a frame is drawn only when something visible changed.
  */
-final class TunerView extends View implements Access.Nodes {
+final class TunerView extends Stage<Ui> {
 
     interface Host {
-        void onThemeApplied(Palette target);
         void onSettingsChanged();
         void setListening(boolean on);
         void onMicAction(int micState);
         void playTone(double hz);
         void stopTone();
-        void setBackIntercept(boolean on);
         /** Lowest pitch one string of the selected tuning can sound; lower means several notes. */
         void setPitchFloor(double hz);
     }
@@ -53,22 +38,14 @@ final class TunerView extends View implements Access.Nodes {
     private static final float SPRING_Z = 0.82f;
     private static final double SILENT_SEC = 1.5;
     private static final long TONE_TAIL_NS = 350_000_000L;   // speaker ring-out ignored after a tone
+    private static final long TONE_FAILED_NS = 2_500_000_000L;  // "Reference tone unavailable" shows this long
 
-    private final Ui ui = new Ui();
     private final Renderer renderer;
     private final Tracker tracker = new Tracker();
     private final Settings settings;
-    private final Palette[] themes;
     private final Host host;
-    private final float slop;
-    private final Access access = new Access(this, ui.hits, this);
-    private final Rect insets = new Rect();
 
-    private int themeIdx, tuningIdx;
-    private Palette palFrom, palTo;
-    private float palT = 1f;
-    private long lastNs;
-    private boolean running;
+    private int tuningIdx;
 
     // Easy (the guided strings) is home; Advanced (the dial) is the other tab; settings goes over either.
     private static final int PAGE_TUNER = 0, PAGE_SETTINGS = 1, PAGE_GUIDE = 2;
@@ -112,7 +89,7 @@ final class TunerView extends View implements Access.Nodes {
     };
     private boolean paused, toneOn;
     private int toneMidi = -1, toneString = -1;
-    private long ignoreUntilNs;
+    private long ignoreUntilNs, toneFailedUntilNs;
     private int mic = MIC_OK;
     private boolean silent;
     private float beadV;
@@ -121,11 +98,6 @@ final class TunerView extends View implements Access.Nodes {
     private int shownMidi = Integer.MIN_VALUE, shownCentsQ = Integer.MIN_VALUE, shownHzQ = Integer.MIN_VALUE, shownState = -1,
             shownOther = -2;
     private String description = "";
-
-    private int downId, repeatId;
-    private boolean repeated;
-    private float downX, downY, lastY;
-    private boolean scrolling, multi;
 
     // ---- frames from the capture thread ----
     private static final int Q = 64;
@@ -164,33 +136,11 @@ final class TunerView extends View implements Access.Nodes {
         }
     };
 
-    private final Runnable repeater = new Runnable() {
-        @Override
-        public void run() {
-            if (repeatId == 0 || ui.hits.pressed != repeatId) return;
-            repeated = true;
-            activate(repeatId);
-            postDelayed(this, 70);
-        }
-    };
-
-    TunerView(Context ctx, Renderer renderer, Settings settings, Palette[] themes, Host host) {
-        super(ctx);
+    TunerView(Context ctx, Renderer renderer, Settings settings, Host host) {
+        super(ctx, new Ui(), settings.theme);
         this.renderer = renderer;
         this.settings = settings;
-        this.themes = themes;
         this.host = host;
-        DisplayMetrics dm = getResources().getDisplayMetrics();
-        ui.dp = dm.density;
-        // the font-size setting (non-linear from Android 14), up to the design system's cap
-        ui.sp = Math.min(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 1f, dm), dm.density * Kit.MAX_FONT_SCALE);
-        slop = ViewConfiguration.get(ctx).getScaledTouchSlop();
-
-        themeIdx = Themes.indexOf(themes, settings.theme);
-        palFrom = palTo = themes[themeIdx];
-        ui.pal = palTo;
-        ui.themes = themes;
-        ui.themeIdx = themeIdx;
         ui.tolOpts = new String[Settings.TOLERANCE.length];
         for (int i = 0; i < ui.tolOpts.length; i++) ui.tolOpts[i] = String.format(Locale.US, "±%d ¢", Math.round(Settings.TOLERANCE[i]));
         tuningIdx = Tuning.indexOf(settings.tuning);
@@ -198,13 +148,6 @@ final class TunerView extends View implements Access.Nodes {
         syncSettings(true);
         t0Ns = System.nanoTime();
         enterGuide(true);                                    // everyone lands on Easy
-        setHapticFeedbackEnabled(true);
-        setFocusable(true);
-        setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
-    }
-
-    Palette currentTarget() {
-        return palTo;
     }
 
     boolean paused() {
@@ -215,16 +158,10 @@ final class TunerView extends View implements Access.Nodes {
         return mic;
     }
 
-    void resume() {
-        running = true;
-        lastNs = 0;
-        invalidate();
-    }
-
-    void pause() {
-        running = false;
+    @Override
+    public void pause() {
+        super.pause();
         if (toneOn) stopTone();
-        removeCallbacks(repeater);
         if (gAdvancing) {
             main.removeCallbacks(advancer);
             advancer.run();                             // the string was tuned: move on now
@@ -243,7 +180,7 @@ final class TunerView extends View implements Access.Nodes {
         out.putBoolean("complete", gComplete);
     }
 
-    /** Right after construction, which lands on Easy: back to where {@link #saveState} left off, unannounced. */
+    /** Right after construction, which lands on Easy: back to where {@link #saveState} left off, the page not named again. */
     void restoreState(Bundle in) {
         paused = in.getBoolean("paused");
         if (in.getInt("basePage", PAGE_GUIDE) == PAGE_TUNER) {
@@ -279,18 +216,12 @@ final class TunerView extends View implements Access.Nodes {
 
     // ---- microphone ------------------------------------------------------------------------
 
+    /** A microphone state other than OK shows in place of the readout, a live region: it is said from there. */
     void setMic(int state) {
         if (state == mic) return;
         mic = state;
         shownState = -1;
-        if (state != MIC_OK) announce(micMessage());
         invalidate();
-    }
-
-    /** A permission request was refused: said again even when the message is already showing. */
-    void micRefused(int state) {
-        if (state != mic) setMic(state);
-        else announce(micMessage());
     }
 
     /** Capture (re)started: audio time begins again at zero; frames of older sessions are dropped. */
@@ -390,27 +321,21 @@ final class TunerView extends View implements Access.Nodes {
         boolean strumChanged = strumState(nowNs) != strumSig;
         boolean nowSilent = !paused && sil >= SILENT_SEC;
         boolean changed = nowSilent != silent || trackerSig() != sig || Math.abs(tracker.cents - cents0) > 0.01 || strumChanged;
-        boolean silenceStarts = nowSilent && !silent;
-        silent = nowSilent;
-        if (silenceStarts && mic == MIC_OK) announce(micMessage());
+        silent = nowSilent;                          // its message replaces the readout
         int ev = tracker.takeEvents();
         if ((ev & Tracker.EV_IN_TUNE) != 0 && !ignore) {
-            if (!tabsCovered()) ui.pulseT = 0f;     // a pulse played after settings closes would mark nothing
-            buzz(true);
-            if (guide && !gComplete && tracker.string == gStep) {
-                if (settings.guideAuto) {
-                    gAdvancing = true;
-                    main.removeCallbacks(advancer);
-                    main.postDelayed(advancer, ADVANCE_MS);
-                }
-                announce("Tuned");
-            } else {
-                announce(tracker.string >= 0 ? "String " + tuning().stringNumber(tracker.string) + " in tune" : "In tune");
+            // a pulse played after settings closes would mark nothing; it is decoration: none without animations
+            if (!tabsCovered() && ui.motion > 0f) ui.pulseT = 0f;
+            haptic(CONFIRM);                         // the reading says it: "in tune", or the guide's "Tuned"
+            if (guide && !gComplete && tracker.string == gStep && settings.guideAuto) {
+                gAdvancing = true;
+                main.removeCallbacks(advancer);
+                main.postDelayed(advancer, ADVANCE_MS);
             }
             changed = true;
         }
         // under settings the tabs are not drawn: they catch up when it slides away
-        if (changed && running && !tabsCovered()) invalidate();
+        if (changed && !tabsCovered()) requestFrame();
     }
 
     private int trackerSig() {
@@ -475,7 +400,7 @@ final class TunerView extends View implements Access.Nodes {
         }, "tuner-strum").start();
     }
 
-    /** UI thread. {@code r} null or a chord: say so; otherwise the per-string results. */
+    /** UI thread. {@code r} null or a chord: "Several notes"; otherwise the per-string results. Both show on the dial. */
     private void showStrum(StrumAnalyzer.Result r, Tuning t, int token) {
         if (token != strumToken) return;              // superseded by a newer strum
         strumBusy = false;
@@ -484,12 +409,10 @@ final class TunerView extends View implements Access.Nodes {
         if (r == null || r.chord || r.heard < Math.max(2, t.count() / 2)) {
             strumResult = null;                       // a chord, or nothing to tell string by string
             chordUntilNs = now + CHORD_NS;
-            if (!guideMode()) announce("Several notes. Pluck one open string at a time");
         } else {
             strumResult = r;
             strumTuning = t;
             chordUntilNs = 0;
-            if (!guideMode()) announce(strumSpoken());
         }
         shownState = -1;
         invalidate();
@@ -567,7 +490,6 @@ final class TunerView extends View implements Access.Nodes {
         if (j >= 0) {
             tracker.locked = j;
             tracker.reset(false);
-            announce("String " + tuning().stringNumber(j) + " locked");
         }
     }
 
@@ -598,73 +520,53 @@ final class TunerView extends View implements Access.Nodes {
         return false;
     }
 
+    @Override
+    protected boolean canGoBack() {
+        return page != PAGE_GUIDE || toneOn;
+    }
+
     /** Back to the tab settings opened over; keyboard focus returns to the settings button. */
     private void closeSettings() {
         page = basePage;
         access.pageChanged(Renderer.H_SETTINGS);
-        announce(page == PAGE_GUIDE ? "Easy tuner" : "Advanced tuner");
+        tabTitle();
     }
 
-    // ---- layout ------------------------------------------------------------------------------
-
-    @Override
-    public WindowInsets onApplyWindowInsets(WindowInsets in) {
-        Chrome.insets(in, insets);
-        ui.insetL = insets.left;
-        ui.insetT = insets.top;
-        ui.insetR = insets.right;
-        ui.insetB = insets.bottom;
-        invalidate();
-        return in;
-    }
-
-    @Override
-    protected void onAttachedToWindow() {
-        super.onAttachedToWindow();
-        requestApplyInsets();
-    }
-
-    @Override
-    protected void onSizeChanged(int w, int h, int ow, int oh) {
-        ui.width = w;
-        ui.height = h;
-        invalidate();
+    /** Names the tab now showing; accessibility services say it as the page changes. */
+    private void tabTitle() {
+        paneTitle(basePage == PAGE_GUIDE ? "Easy tuner" : "Advanced tuner");
     }
 
     // ---- frame -------------------------------------------------------------------------------
 
     @Override
-    protected void onDraw(Canvas c) {
-        long now = System.nanoTime();
-        float dt = lastNs == 0 ? 1f / 60f : Math.min(0.05f, (now - lastNs) * 1e-9f);
-        lastNs = now;
-        boolean animating = step(dt, now);
+    protected void render(Canvas c) {
         renderer.draw(c, ui);
-        access.afterFrame();
-        // The reading is phrased in whole cents, so it changes only when a listener would care.
-        int live = ui.hits.find(Renderer.H_DIAL) != null ? Renderer.H_DIAL
-                : ui.hits.find(Renderer.H_GUIDE) != null ? Renderer.H_GUIDE : 0;
-        boolean unsaid = access.live(live, live == Renderer.H_GUIDE ? gDescription : description, now);
-        if (unsaid && running) postInvalidateDelayed(300);   // come back to say the settled reading
-        if (running && animating) postInvalidateOnAnimation();
-        else lastNs = 0;                   // next frame after an idle gap starts with a nominal dt
     }
 
-    private boolean step(float dt, long now) {
+    /**
+     * The dial, the guide's meter, or the message shown in their place is a polite live region:
+     * the reading (in whole cents, so it changes only when a listener would care), reaching pitch,
+     * a strum's result, the guide's step and advice, a microphone message.
+     */
+    @Override
+    protected int liveTarget() {
+        if (ui.hits.find(Renderer.H_DIAL) != null) return Renderer.H_DIAL;
+        if (ui.hits.find(Renderer.H_GUIDE) != null) return Renderer.H_GUIDE;
+        return Renderer.H_MIC;                       // none when no message is on screen either
+    }
+
+    @Override
+    protected boolean step(float dt, long now) {
         boolean anim = false;                    // settings, and the move between pages
         boolean tabAnim = false;                 // drawn only while a tab shows
 
-        if (palT < 1f) {
-            palT = Math.min(1f, palT + dt / Motion.THEME);
-            ui.pal = Palette.lerp(palFrom, palTo, Motion.ease(palT));
-            anim = true;
-        }
-        float ps = page == PAGE_SETTINGS ? 1f : 0f, pg = guideMode() ? 1f : 0f;
-        ui.pageT = Motion.approach(ui.pageT, ps, dt, Motion.PAGE);
-        ui.guideT = Motion.approach(ui.guideT, pg, dt, Motion.PAGE);
+        // settings over the tabs; a back gesture previews closing it
+        float ps = page == PAGE_SETTINGS ? 1f - BACK_PREVIEW * ui.backT : 0f, pg = guideMode() ? 1f : 0f;
+        ui.pageT = approach(ui.pageT, ps, dt, Motion.PAGE);
+        ui.guideT = approach(ui.guideT, pg, dt, Motion.PAGE);
         anim |= ui.pageT != ps || ui.guideT != pg;
         access.list = page == PAGE_SETTINGS ? ui.page : null;
-        host.setBackIntercept(page != PAGE_GUIDE || toneOn);           // host no-ops if unchanged
         ui.time = (now - t0Ns) * 1e-9f;
 
         boolean strumView = strumResult != null && strumResult.suggest < 0 && !guideMode();
@@ -674,9 +576,9 @@ final class TunerView extends View implements Access.Nodes {
         boolean showing = (overlay ? strumBead : tracker.hasNote) && !toneOn && !paused && mic == MIC_OK && !silent;
         float nt = showing ? 1f : 0f, lt = showing && tracker.live && !strumView ? 1f : 0f;
         float tt = showing && !strumView && (tracker.live && tracker.inTune || guideMode() && gAdvancing) ? 1f : 0f;
-        ui.noteT = Motion.approach(ui.noteT, nt, dt, 0.12f);
-        ui.liveT = Motion.approach(ui.liveT, lt, dt, 0.10f);
-        ui.tuneT = Motion.approach(ui.tuneT, tt, dt, 0.07f);
+        ui.noteT = approach(ui.noteT, nt, dt, 0.12f);
+        ui.liveT = approach(ui.liveT, lt, dt, 0.10f);
+        ui.tuneT = approach(ui.tuneT, tt, dt, 0.07f);
         tabAnim |= ui.noteT != nt || ui.liveT != lt || ui.tuneT != tt;
 
         float target = strumBead ? Renderer.beadOf(strumResult.cents[worst])
@@ -696,11 +598,11 @@ final class TunerView extends View implements Access.Nodes {
         }
 
         float st = tuning().chromatic() ? 0f : 1f;
-        ui.stringsT = Motion.approach(ui.stringsT, st, dt, 0.09f);
+        ui.stringsT = approach(ui.stringsT, st, dt, 0.09f);
         tabAnim |= ui.stringsT != st;
         int tgt = toneOn ? toneString : strumView ? worst : tracker.hasNote ? tracker.string : -1;
         float sv = strumView ? 1f : 0f;
-        ui.strumT = Motion.approach(ui.strumT, sv, dt, 0.1f);
+        ui.strumT = approach(ui.strumT, sv, dt, 0.1f);
         tabAnim |= ui.strumT != sv;
         ui.strumOk = (float) strumOk();
         for (int i = 0; i < ui.stringCount; i++) {
@@ -710,25 +612,25 @@ final class TunerView extends View implements Access.Nodes {
             float a = (tracker.tunedMask & (1 << i)) != 0 ? 1f : 0f;
             float b = i == tgt ? (toneOn || (tracker.live && !paused) ? 1f : 0.5f) : 0f;
             float k = tracker.locked == i ? 1f : 0f;
-            ui.sTunedT[i] = Motion.approach(ui.sTunedT[i], a, dt, 0.08f);
-            ui.sTargetT[i] = Motion.approach(ui.sTargetT[i], b, dt, 0.08f);
-            ui.sLockT[i] = Motion.approach(ui.sLockT[i], k, dt, 0.08f);
+            ui.sTunedT[i] = approach(ui.sTunedT[i], a, dt, 0.08f);
+            ui.sTargetT[i] = approach(ui.sTargetT[i], b, dt, 0.08f);
+            ui.sLockT[i] = approach(ui.sLockT[i], k, dt, 0.08f);
             tabAnim |= ui.sTunedT[i] != a || ui.sTargetT[i] != b || ui.sLockT[i] != k;
         }
 
         float h = settings.haptics ? 1f : 0f, ko = settings.keepOn ? 1f : 0f;
-        ui.hapticsT = Motion.approach(ui.hapticsT, h, dt, Motion.CONTROL);
-        ui.keepOnT = Motion.approach(ui.keepOnT, ko, dt, Motion.CONTROL);
-        ui.tolPos = Motion.approach(ui.tolPos, ui.tolIdx, dt, Motion.CONTROL);
-        ui.needlePos = Motion.approach(ui.needlePos, ui.needle, dt, Motion.CONTROL);
-        ui.namesPos = Motion.approach(ui.namesPos, ui.names, dt, Motion.CONTROL);
+        ui.hapticsT = approach(ui.hapticsT, h, dt, Motion.CONTROL);
+        ui.keepOnT = approach(ui.keepOnT, ko, dt, Motion.CONTROL);
+        ui.tolPos = approach(ui.tolPos, ui.tolIdx, dt, Motion.CONTROL);
+        ui.needlePos = approach(ui.needlePos, ui.needle, dt, Motion.CONTROL);
+        ui.namesPos = approach(ui.namesPos, ui.names, dt, Motion.CONTROL);
         anim |= ui.hapticsT != h || ui.keepOnT != ko || ui.tolPos != ui.tolIdx || ui.needlePos != ui.needle
                 || ui.namesPos != ui.names;
 
         ui.toneOn = toneOn;
         ui.paused = paused;
         updateReadout(now);
-        if (now < chordUntilNs || strumPending(now)) tabAnim = true;      // shown until a moment passes
+        if (now < chordUntilNs || strumPending(now) || now < toneFailedUntilNs) tabAnim = true;   // shown until a moment passes
         if (ui.guideT > 0.001f) tabAnim |= stepGuide(dt, now);
 
         // the screen stays on only while it is useful: tuning or a reference tone
@@ -774,14 +676,17 @@ final class TunerView extends View implements Access.Nodes {
 
     private static final int ST_MESSAGE = 1, ST_PAUSED = 2, ST_TONE = 3, ST_IDLE = 4, ST_NOTE = 5,
             ST_STRUM = 6, ST_CHORD = 7, ST_STRUMMING = 8;
+    /** What else takes the readout's place, besides the microphone states (MIC_*). */
+    private static final int MSG_SILENT = 7, MSG_TONE = 8;
 
     private void updateReadout(long now) {
         int state;
         // state = class * 16 + detail; the tone comes before the pause: it also plays while paused
         if (mic != MIC_OK) state = ST_MESSAGE * 16 + mic;
         else if (toneOn) state = ST_TONE * 16;
+        else if (now < toneFailedUntilNs) state = ST_MESSAGE * 16 + MSG_TONE;
         else if (paused) state = ST_PAUSED * 16;
-        else if (silent) state = ST_MESSAGE * 16 + 7;
+        else if (silent) state = ST_MESSAGE * 16 + MSG_SILENT;
         else if (strumResult != null) state = ST_STRUM * 16 + (strumToken & 15);
         else if (now < chordUntilNs) state = ST_CHORD * 16;
         else if (strumPending(now)) state = ST_STRUMMING * 16;
@@ -811,10 +716,9 @@ final class TunerView extends View implements Access.Nodes {
         boolean flats = t.flats(settings.flats);
         switch (state / 16) {
             case ST_MESSAGE:
-                ui.message = micMessage();
+                ui.message = message(state % 16);
                 ui.messageAction = mic == MIC_NEED ? "Allow" : mic == MIC_BLOCKED ? "Open settings" : mic == MIC_ERROR ? "Retry" : "";
                 ui.letter = 0;
-                describe(ui.message);
                 return;
             case ST_PAUSED:
                 ui.caption = "Paused";
@@ -846,7 +750,7 @@ final class TunerView extends View implements Access.Nodes {
                 ui.letter = 0;
                 ui.cents = "Several notes";
                 ui.hint = "Pluck one open string at a time";
-                describe("Chord. Pluck one open string at a time");
+                describe("Chord. Several notes. Pluck one open string at a time");
                 return;
             case ST_STRUM:
                 readStrum(flats);
@@ -929,7 +833,7 @@ final class TunerView extends View implements Access.Nodes {
     private String spokenReading() {
         Tuning t = tuning();
         String s = Tuning.spoken(tracker.midi, t.flats(settings.flats));
-        if (tracker.string >= 0) s += ", string " + t.stringNumber(tracker.string);
+        if (tracker.string >= 0) s += ", string " + t.stringNumber(tracker.string) + (tracker.locked >= 0 ? ", locked" : "");
         double c = tracker.cents;
         int r = (int) Math.round(Math.abs(c));
         if (tracker.inTune) s += ", in tune";
@@ -938,83 +842,20 @@ final class TunerView extends View implements Access.Nodes {
         return tracker.live ? s : s + ", last reading";
     }
 
-    private String micMessage() {
-        switch (mic) {
+    /** What takes the readout's place: a microphone state (MIC_*), silence, or a reference tone that could not play. */
+    private static String message(int kind) {
+        switch (kind) {
             case MIC_NEED: return "Microphone access needed";
             case MIC_BLOCKED: return "Microphone access is off";
             case MIC_ERROR: return "Microphone unavailable";
-            default: return silent ? "No sound from the microphone" : "";
+            case MSG_SILENT: return "No sound from the microphone";
+            default: return "Reference tone unavailable";
         }
     }
 
     /** Text of the dial's virtual node. Not set on the host view: its changes would be spoken unthrottled. */
     private void describe(String s) {
         description = s;
-    }
-
-    // What is said here are moments (reaching pitch, a tab or mode switched, a refusal), not text
-    // left on screen to re-read; the readings themselves are the throttled live region.
-    private void announce(String s) {
-        access.announce(s);
-    }
-
-    // ---- input -------------------------------------------------------------------------------
-
-    @Override
-    public boolean onTouchEvent(MotionEvent e) {
-        float x = e.getX(), y = e.getY();
-        switch (e.getActionMasked()) {
-            case MotionEvent.ACTION_DOWN:
-                downX = x;
-                downY = y;
-                lastY = y;
-                scrolling = multi = repeated = false;
-                ui.hits.focused = 0;                   // touch hides the keyboard focus ring
-                downId = ui.hits.at(x, y);
-                ui.hits.pressed = downId;
-                if (ui.page.repeats(downId)) {         // a finger held on a stepper chevron steps on
-                    repeatId = downId;
-                    postDelayed(repeater, 450);
-                }
-                invalidate();
-                return true;
-            case MotionEvent.ACTION_POINTER_DOWN:
-                multi = true;                      // a second finger cancels the gesture
-                cancelPress();
-                return true;
-            case MotionEvent.ACTION_MOVE: {
-                if (multi) return true;
-                float dx = x - downX, dy = y - downY;
-                if (!scrolling && !repeated && page == PAGE_SETTINGS && ui.page.maxScroll > 0f
-                        && Math.abs(dy) > slop && Math.abs(dy) > Math.abs(dx)) {
-                    scrolling = true;
-                }
-                if (scrolling && ui.page.scrollBy(lastY - y)) invalidate();
-                lastY = y;
-                if (ui.hits.pressed != 0 && (scrolling || ui.hits.at(x, y) != downId)) {
-                    ui.hits.pressed = 0;
-                    repeatId = 0;
-                    removeCallbacks(repeater);
-                    invalidate();
-                }
-                return true;
-            }
-            case MotionEvent.ACTION_UP: {
-                removeCallbacks(repeater);
-                ui.hits.pressed = 0;
-                if (!multi && !scrolling && !repeated && downId != 0 && ui.hits.at(x, y) == downId) activate(downId);
-                scrolling = multi = repeated = false;
-                downId = repeatId = 0;
-                invalidate();
-                return true;
-            }
-            case MotionEvent.ACTION_CANCEL:
-                cancelPress();
-                scrolling = multi = false;
-                return true;
-            default:
-                return true;
-        }
     }
 
     // ---- guided tuning -----------------------------------------------------------------------
@@ -1052,7 +893,7 @@ final class TunerView extends View implements Access.Nodes {
         ui.gCursor = gStep;
         ui.gDoneT = gComplete ? 1.2f : 0f;
         if (snap) ui.guideT = 1f;
-        if (!snap) announce("Easy tuner");
+        if (!snap) tabTitle();
         invalidate();
     }
 
@@ -1066,7 +907,7 @@ final class TunerView extends View implements Access.Nodes {
         tracker.locked = -1;
         applyTrackerMode();
         tracker.reset(false);                               // the marks stay on the string row
-        announce("Advanced tuner");
+        tabTitle();
         invalidate();
     }
 
@@ -1100,7 +941,6 @@ final class TunerView extends View implements Access.Nodes {
         guideReset(0.0);
         retargetTone();
         ui.gDoneT = 0f;
-        announce(guideTitle());
     }
 
     /** Next string not yet tuned after the current one, wrapping round; none left: the summary. */
@@ -1120,7 +960,6 @@ final class TunerView extends View implements Access.Nodes {
             guideReset(tuned ? Tuning.freq(t.strings[prev], settings.a4) : 0.0);
             retargetTone();
         }
-        announce(guideTitle());
         invalidate();
     }
 
@@ -1182,7 +1021,6 @@ final class TunerView extends View implements Access.Nodes {
         double keep = tracker.lastOnset;
         guideJump(best);
         gFollowedOnset = keep;
-        announce("Switched to the " + Guide.position(t, best));
         return true;
     }
 
@@ -1198,7 +1036,7 @@ final class TunerView extends View implements Access.Nodes {
         }
         int st = guide.status;
         if (st == Guide.UNHEARD) gUnheardShown = true;
-        if (st == Guide.WRONG_WAY && ui.gShakeT < 0f) ui.gShakeT = 0f;
+        if (st == Guide.WRONG_WAY && ui.gShakeT < 0f && ui.motion > 0f) ui.gShakeT = 0f;    // decoration: none without animations
         String word = Guide.word(st), detail = Guide.detail(st, guide.arg, tuning(), gStep, settings.guideAuto);
         if (!word.equals(ui.gWord) || !detail.equals(ui.gDetail)) {
             ui.gWordPrev = ui.gWord;
@@ -1217,7 +1055,7 @@ final class TunerView extends View implements Access.Nodes {
         if (t.chromatic() || gStep >= t.count()) {
             // Easy still fading out while Advanced selects a tuning it cannot show (Chromatic, or
             // fewer strings than the step): keep the last words, finish the fade.
-            return running && ui.guideT > 0.001f;
+            return ui.guideT > 0.001f;
         }
         ui.guideDone = gComplete;
         ui.gStep = gStep;
@@ -1253,14 +1091,15 @@ final class TunerView extends View implements Access.Nodes {
                     : (ui.gTitle + ". " + (ui.gWord.length() > 0 ? ui.gWord + ". " : "") + ui.gDetail).trim();
         }
 
-        ui.gTitleT = Math.min(1f, ui.gTitleT + dt / 0.35f);
-        ui.gWordT = Math.min(1f, ui.gWordT + dt / 0.25f);
-        ui.gCursor = Motion.approach(ui.gCursor, gStep, dt, 0.09f);
+        ui.gTitleT = tween(ui.gTitleT, 1f, dt, 0.35f);
+        ui.gWordT = tween(ui.gWordT, 1f, dt, 0.25f);
+        ui.gCursor = approach(ui.gCursor, gStep, dt, 0.09f);
         boolean ok = mic == MIC_OK && !silent && !paused && !toneOn;
         boolean waiting = ok && !gComplete && !gAdvancing && !tracker.live;
         // Easy is the home screen: the demonstration plays three times, then rests (no frames,
-        // no battery) until the step changes or the next sound has died away.
-        if (waiting && gPluckClock < DEMO_S) {
+        // no battery) until the step changes or the next sound has died away. Without animations
+        // it does not play: the sub-line says what to do.
+        if (waiting && gPluckClock < DEMO_S && ui.motion > 0f) {
             gPluckClock += dt;
             ui.gPluckT = gPluckClock < DEMO_S ? gPluckClock % 2.8f : -1f;
         } else {
@@ -1268,62 +1107,43 @@ final class TunerView extends View implements Access.Nodes {
             ui.gPluckT = -1f;
         }
         boolean live = ok && tracker.live && !gComplete;
-        ui.gVib = Motion.approach(ui.gVib, live ? 1f : 0f, dt, live ? 0.05f : 0.4f);
+        ui.gVib = approach(ui.gVib, live && ui.motion > 0f ? 1f : 0f, dt, live ? 0.05f : 0.4f);   // a wobble: decoration
         float sag = tracker.hasNote && !gComplete ? (float) Math.max(0.0, Math.min(1.0, -tracker.cents / 150.0)) : 0f;
-        ui.gSag = Motion.approach(ui.gSag, sag, dt, 0.15f);
+        ui.gSag = approach(ui.gSag, sag, dt, 0.15f);
         int gs = guide.status;
         boolean direction = gs == Guide.TIGHTEN || gs == Guide.LOOSEN || gs == Guide.WRONG_WAY || gs == Guide.ALMOST;
         float chev = live && !gAdvancing && direction && Math.abs(tracker.cents) > tracker.tolerance ? 1f : 0f;
-        ui.gChevT = Motion.approach(ui.gChevT, chev, dt, 0.12f);
+        ui.gChevT = approach(ui.gChevT, chev, dt, 0.12f);
         if (ui.gShakeT >= 0f) {
             ui.gShakeT += dt / 0.5f;
             if (ui.gShakeT >= 1f) ui.gShakeT = -1f;
         }
-        if (gComplete) ui.gDoneT = Math.min(1.2f, ui.gDoneT + dt / 0.8f);
-        boolean moving = ui.gPluckT >= 0f || ui.gVib > 0f || ui.gChevT > 0f || ui.gShakeT >= 0f
+        if (gComplete) ui.gDoneT = tween(ui.gDoneT, 1.2f, dt, 0.8f);
+        // the chevrons march, unless animations are off (Renderer)
+        return ui.gPluckT >= 0f || ui.gVib > 0f || ui.gChevT > 0f && ui.motion > 0f || ui.gShakeT >= 0f
                 || ui.gTitleT < 1f || ui.gWordT < 1f || ui.gCursor != gStep || ui.gSag != sag
                 || gComplete && ui.gDoneT < 1.2f
                 || waiting && !gUnheardShown && now - gLastHeardNs < 6_500_000_000L;   // for "not hearing it"
-        return running && moving;
+    }
+
+    /**
+     * A timed transition from {@code t} to {@code end} at one unit per {@code dur} seconds, slowed
+     * or sped like {@link #approach} by the system's animation scale: there at once without animations.
+     */
+    private float tween(float t, float end, float dt, float dur) {
+        return ui.motion > 0f ? Math.min(end, t + dt / (dur * ui.motion)) : end;
     }
 
     private static final float DEMO_S = 3 * 2.8f;
 
-    // ---- keyboard and D-pad: Access moves a focus ring over the targets ------------------------
+    // ---- actions -----------------------------------------------------------------------------
 
     @Override
-    protected void onFocusChanged(boolean gained, int direction, Rect previous) {
-        super.onFocusChanged(gained, direction, previous);
-        access.onFocusChanged(gained);
-    }
-
-    @Override
-    public boolean onKeyDown(int code, KeyEvent e) {
-        return access.onKeyDown(code, e) || super.onKeyDown(code, e);
-    }
-
-    @Override
-    public boolean onKeyUp(int code, KeyEvent e) {
-        return access.onKeyUp(code, e) || super.onKeyUp(code, e);
-    }
-
-    private void cancelPress() {
-        removeCallbacks(repeater);
-        ui.hits.pressed = 0;
-        downId = repeatId = 0;
-        scrolling = false;
-        invalidate();
-    }
-
-    @Override
-    public void activate(int id) {
-        if (!acts(id)) return;                            // a tap on text: no buzz either
+    protected void act(int id) {
         boolean changed = false;
         if (id >= Renderer.H_GSTRING && id < Renderer.H_GSTRING + Ui.MAX_STRINGS) {
             int i = id - Renderer.H_GSTRING;
             if (i < tuning().count()) guideJump(i);           // the tone, if on, follows
-            buzz(false);
-            invalidate();
             return;
         }
         if (id >= Renderer.H_STRING && id < Renderer.H_STRING + Ui.MAX_STRINGS) {
@@ -1337,10 +1157,7 @@ final class TunerView extends View implements Access.Nodes {
                 tracker.locked = tracker.locked == i ? -1 : i;
                 tracker.reset(false);
                 clearStrum();
-                announce(tracker.locked >= 0 ? "String " + tuning().stringNumber(i) + " locked" : "Automatic string");
             }
-            buzz(false);
-            invalidate();
             return;
         }
         switch (id) {
@@ -1349,7 +1166,7 @@ final class TunerView extends View implements Access.Nodes {
                 page = PAGE_SETTINGS;
                 ui.page.scroll = 0f;
                 access.pageChanged(0);
-                announce("Settings");
+                paneTitle("Settings");
                 break;
             case Renderer.H_BACK: closeSettings(); break;
             case Renderer.H_TONE:
@@ -1364,7 +1181,6 @@ final class TunerView extends View implements Access.Nodes {
                 tracker.reset(false);
                 gLastHeardNs = System.nanoTime();         // "not hearing it" counts from now
                 host.setListening(!paused);
-                announce(paused ? "Paused" : "Listening");
                 break;
             case Renderer.H_MIC: host.onMicAction(mic); break;
             case Renderer.H_SUGGEST: if (!guideMode()) suggestion(); break;
@@ -1386,7 +1202,6 @@ final class TunerView extends View implements Access.Nodes {
                     main.postDelayed(advancer, ADVANCE_MS);
                 }
                 guide.reset();                               // the words depend on the mode
-                announce(settings.guideAuto ? "Strings switch automatically" : "Strings switch when you tap Next");
                 changed = true;
                 break;
             case Renderer.H_GUIDE_AGAIN:
@@ -1413,7 +1228,7 @@ final class TunerView extends View implements Access.Nodes {
                     settings.fast = id - Renderer.H_NEEDLE == 1;
                 } else if (id >= Renderer.H_NAMES && id < Renderer.H_NAMES + Renderer.NAMES.length) {
                     settings.flats = id - Renderer.H_NAMES == 1;
-                } else if (id >= Renderer.H_THEME && id < Renderer.H_THEME + themes.length) {
+                } else if (id >= Renderer.H_THEME && id < Renderer.H_THEME + ui.themes.length) {
                     setTheme(id - Renderer.H_THEME);
                     break;
                 } else {
@@ -1422,12 +1237,10 @@ final class TunerView extends View implements Access.Nodes {
                 changed = true;
                 break;
         }
-        buzz(false);
         if (changed) {
             syncSettings(false);
             host.onSettingsChanged();
         }
-        invalidate();
     }
 
     private void startTone() {
@@ -1440,18 +1253,18 @@ final class TunerView extends View implements Access.Nodes {
             toneMidi = t.strings[toneString];
         }
         toneOn = true;
+        toneFailedUntilNs = 0;
         tracker.reset(false);
         host.playTone(Tuning.freq(toneMidi, settings.a4));
-        announce("Reference tone " + Tuning.spoken(toneMidi, t.flats(settings.flats)));
     }
 
-    /** The reference tone could not play: back to tuning. */
+    /** The reference tone could not play: back to tuning, the failure shown in place of the readout for a moment. */
     void onToneFailed() {
         if (!toneOn) return;
         toneOn = false;
         toneString = -1;
         tracker.reset(false);
-        announce("Reference tone unavailable");
+        toneFailedUntilNs = System.nanoTime() + TONE_FAILED_NS;
         invalidate();
     }
 
@@ -1467,18 +1280,10 @@ final class TunerView extends View implements Access.Nodes {
         invalidate();
     }
 
-    private void setTheme(int idx) {
-        if (idx == themeIdx) return;
-        themeIdx = idx;
-        palFrom = ui.pal;
-        palTo = themes[themeIdx];
-        palT = 0f;
-        ui.themeIdx = themeIdx;
-        settings.theme = palTo.name;
-        host.onThemeApplied(palTo);
+    @Override
+    protected void themeChanged(Palette p) {
+        settings.theme = p.name;
         host.onSettingsChanged();
-        announce("Theme " + palTo.name);
-        invalidate();
     }
 
     private Tuning tuning() {
@@ -1490,7 +1295,6 @@ final class TunerView extends View implements Access.Nodes {
         settings.tuning = tuning().name;
         if (toneOn) stopTone();
         applyTuning(false);
-        announce("Tuning " + tuning().name);
     }
 
     private void applyTuning(boolean snap) {
@@ -1538,6 +1342,7 @@ final class TunerView extends View implements Access.Nodes {
         ui.names = settings.flats ? 1 : 0;
         ui.haptics = settings.haptics;
         ui.keepOn = settings.keepOn;
+        setHaptics(settings.haptics);
         respell();
         if (toneOn) host.playTone(Tuning.freq(toneMidi, settings.a4));
         if (snap) {
@@ -1550,28 +1355,9 @@ final class TunerView extends View implements Access.Nodes {
         shownState = -1;
     }
 
-    private void buzz(boolean strong) {
-        if (!settings.haptics) return;
-        int c;
-        if (strong) c = Build.VERSION.SDK_INT >= 30 ? HapticFeedbackConstants.CONFIRM : HapticFeedbackConstants.VIRTUAL_KEY;
-        else c = HapticFeedbackConstants.KEYBOARD_TAP;
-        performHapticFeedback(c);
-    }
-
     // ---- accessibility -----------------------------------------------------------------------
-    // The whole UI is one custom view: every target is a virtual node (Access), so TalkBack, Switch
-    // Access and keyboard users reach the controls. The dial, or the guide's meter, is a polite
-    // live region that says the reading at most every 1.5 s (onDraw).
-
-    @Override
-    public AccessibilityNodeProvider getAccessibilityNodeProvider() {
-        return access;
-    }
-
-    @Override
-    protected boolean dispatchHoverEvent(MotionEvent e) {
-        return access.onHover(e) || super.dispatchHoverEvent(e);
-    }
+    // The whole UI is one custom view: every target is a virtual node (Stage's Access), so TalkBack,
+    // Switch Access and keyboard users reach the controls. The settings rows answer for themselves.
 
     @Override
     public String label(int id) {
@@ -1615,21 +1401,21 @@ final class TunerView extends View implements Access.Nodes {
             case Renderer.H_TUNING_NEXT: return "Tuning " + ui.tuningName + ". Next";
             case Renderer.H_A4: return "Reference pitch, A4 " + settings.a4 + " hertz. Lower";
             case Renderer.H_A4 + 1: return "Reference pitch, A4 " + settings.a4 + " hertz. Higher";
-            default: return ui.page.label(id);
+            default: return super.label(id);
         }
     }
 
     @Override
     public int role(int id) {
-        int r = ui.page.role(id);
-        if (r >= 0) return r;
         switch (id) {
             case Renderer.H_TONE:
             case Renderer.H_PAUSE:
             case Renderer.H_GUIDE_AUTO:
             case Renderer.H_GUIDE_OPEN: return Hits.SWITCH;
-            case Renderer.H_GUIDE: return Hits.TEXT;      // the advice; what a tap does is its click label
-            default: return acts(id) ? Hits.BUTTON : Hits.TEXT;
+            case Renderer.H_DIAL:
+            case Renderer.H_GUIDE: return Hits.TEXT;      // the guide's advice; what a tap does is its click label
+            case Renderer.H_MIC: return acts(id) ? Hits.BUTTON : Hits.TEXT;
+            default: return super.role(id);
         }
     }
 
@@ -1640,7 +1426,7 @@ final class TunerView extends View implements Access.Nodes {
             case Renderer.H_PAUSE: return !paused;
             case Renderer.H_GUIDE_AUTO: return settings.guideAuto;
             case Renderer.H_GUIDE_OPEN: return !guideMode();
-            default: return ui.page.checked(id);
+            default: return super.checked(id);
         }
     }
 
@@ -1663,11 +1449,6 @@ final class TunerView extends View implements Access.Nodes {
     public CharSequence clickLabel(int id) {
         if (id != Renderer.H_GUIDE) return null;
         return settings.guideAuto && (tracker.tunedMask & (1 << gStep)) == 0 ? "Skip this string" : "Next string";
-    }
-
-    @Override
-    public boolean repeats(int id) {
-        return ui.page.repeats(id);
     }
 
     // ---- math --------------------------------------------------------------------------------
