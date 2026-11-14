@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Gradle-free build: aapt2 -> javac -> d8 -> zipalign -> apksigner.
-# Needs a JDK, zip, python3 with PIL, and the Android SDK packages
-#   sdkmanager "platforms;android-36" "build-tools;36.0.0"
+# Gradle-free build: aapt2 -> javac -> R8 -> bundletool.
+#   build/Tuner.aab          Google Play upload (signed with the upload key, R8 mapping embedded)
+#   build/Tuner.apk          universal APK built from that bundle, for sideloading
+#   build/mapping.txt        R8 mapping for retracing stack traces from either
+# Needs: Android SDK (platforms;android-36, build-tools, cmdline-tools;latest), JDK 17+, bundletool,
+# python3 with Pillow, zip.
 # SDK location: ANDROID_SDK_ROOT, ANDROID_HOME or ANDROID_SDK (Debian's /usr/lib/android-sdk is the fallback).
-# Overrides: BUILD_TOOLS, PLATFORM_JAR, VERSION_NAME, VERSION_CODE, KEYSTORE.
+# Overrides: BUILD_TOOLS, PLATFORM_JAR, R8_JAR, BUNDLETOOL, VERSION_CODE, VERSION_NAME, KEYSTORE, KEYSTORE_ALIAS.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -18,65 +21,85 @@ if [ -z "$BT" ]; then
     BT=$SDK/build-tools/$newest
 fi
 JAR=${PLATFORM_JAR:-$SDK/platforms/android-36/android.jar}
-[ -f "$JAR" ] || { echo "error: $JAR not found; run: sdkmanager \"platforms;android-36\"" >&2; exit 1; }
+R8_JAR=${R8_JAR:-$SDK/cmdline-tools/latest/lib/r8.jar}
+for f in "$BT/aapt2" "$BT/lib/apksigner.jar" "$JAR" "$R8_JAR"; do
+    [ -e "$f" ] || { echo "error: $f missing; install it with sdkmanager (build-tools, platforms;android-36, cmdline-tools;latest)" >&2; exit 1; }
+done
+BUNDLETOOL=${BUNDLETOOL:-bundletool}
+command -v "$BUNDLETOOL" >/dev/null || { echo "error: bundletool not on PATH (or set BUNDLETOOL)" >&2; exit 1; }
 
-# zipalign and apksigner ship in build-tools; Debian packages them on PATH instead.
-tool() {
-    if [ -x "$BT/$1" ]; then echo "$BT/$1"; else command -v "$1" || { echo "error: $1 not found in $BT or on PATH" >&2; exit 1; }; fi
-}
-AAPT2=$(tool aapt2) D8=$(tool d8) ZIPALIGN=$(tool zipalign) APKSIGNER=$(tool apksigner)
-
-# VERSION holds major.minor.patch; the code is major*10000 + minor*100 + patch, so it only grows.
-VERSION_NAME=${VERSION_NAME:-$(tr -d '[:space:]' < VERSION)}
-if [ -z "${VERSION_CODE:-}" ]; then
-    [[ $VERSION_NAME =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "error: VERSION_NAME '$VERSION_NAME' is not major.minor.patch; set VERSION_CODE" >&2; exit 1; }
-    IFS=. read -r major minor patch <<< "$VERSION_NAME"
-    VERSION_CODE=$((10#$major * 10000 + 10#$minor * 100 + 10#$patch))
-fi
-KS=${KEYSTORE:-keystore/tuner.jks}
+MIN_SDK=24
+TARGET_SDK=36
+VERSION_CODE=${VERSION_CODE:-1}
+VERSION_NAME=${VERSION_NAME:-1.0.0}
+KS=${KEYSTORE:-${XDG_DATA_HOME:-$HOME/.local/share}/guitar-tuner-android/upload.jks}
+KS_ALIAS=${KEYSTORE_ALIAS:-upload}
 OUT=build
 
-# Signing: the key must stay the same for every build that should install over a previous one.
-# It is never generated silently; NEW_KEYSTORE=1 creates one on purpose.
-: "${KEYSTORE_PASS:?set KEYSTORE_PASS to the keystore password}"
+# Upload key: Play App Signing holds the app signing key; this key only authenticates uploads.
+# The password comes from KEYSTORE_PASS or, failing that, the desktop keyring.
+if [ -z "${KEYSTORE_PASS:-}" ] && command -v secret-tool >/dev/null; then
+    KEYSTORE_PASS=$(secret-tool lookup service guitar-tuner-android key upload-keystore || true)
+fi
+: "${KEYSTORE_PASS:?set KEYSTORE_PASS (or store it: secret-tool store --label=guitar-tuner-android service guitar-tuner-android key upload-keystore)}"
+export KEYSTORE_PASS
 if [ ! -f "$KS" ]; then
     if [ "${NEW_KEYSTORE:-0}" != 1 ]; then
         echo "error: keystore $KS not found." >&2
-        echo "Restore it, or run with NEW_KEYSTORE=1 to create a new key (a new key cannot update installs signed with the old one)." >&2
+        echo "Restore it, or run with NEW_KEYSTORE=1 to create a new upload key." >&2
         exit 1
     fi
-    mkdir -p "$(dirname "$KS")"
-    keytool -genkeypair -keystore "$KS" -storetype PKCS12 -alias tuner -keyalg RSA -keysize 3072 \
-        -validity 10000 -storepass:env KEYSTORE_PASS -keypass:env KEYSTORE_PASS -dname "CN=Tuner"
-    echo "created $KS - back it up; it signs every future update"
+    mkdir -p -m 700 "$(dirname "$KS")"
+    keytool -genkeypair -keystore "$KS" -storetype PKCS12 -alias "$KS_ALIAS" -keyalg RSA -keysize 4096 \
+        -validity 10000 -storepass:env KEYSTORE_PASS -keypass:env KEYSTORE_PASS \
+        -dname "CN=Saatvik Sharma, O=Tuner" 2>/dev/null
+    chmod 600 "$KS"
+    echo "created $KS - back it up"
 fi
 
 rm -rf "$OUT"
-mkdir -p "$OUT/flat" "$OUT/gen" "$OUT/classes" "$OUT/dex"
+mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/base/manifest" "$OUT/base/dex"
 
 python3 tools/make_icons.py res
 
-"$AAPT2" compile --dir res -o "$OUT/flat/res.zip"
+# Resources, compiled once in protobuf form: bundletool turns them into the APKs Play serves.
 # Assets (the Rubik fonts) come from the hairline design system.
-"$AAPT2" link -I "$JAR" \
+"$BT/aapt2" compile --dir res -o "$OUT/res.zip"
+"$BT/aapt2" link --proto-format -I "$JAR" \
     --manifest AndroidManifest.xml \
     -A hairline/assets \
-    --min-sdk-version 23 --target-sdk-version 36 \
+    --proguard "$OUT/aapt-rules.pro" \
+    --min-sdk-version "$MIN_SDK" --target-sdk-version "$TARGET_SDK" \
     --version-code "$VERSION_CODE" --version-name "$VERSION_NAME" \
-    -o "$OUT/res.apk" "$OUT/flat/res.zip"
+    -o "$OUT/proto.zip" "$OUT/res.zip"
 
-javac -nowarn -Xlint:-options -source 8 -target 8 -encoding UTF-8 \
+javac -nowarn -Xlint:-options -XDsuppressNotes -source 8 -target 8 -encoding UTF-8 \
     -bootclasspath "$JAR" -d "$OUT/classes" \
-    $(find src hairline/src hairline/android "$OUT/gen" -name '*.java')
+    $(find src hairline/src hairline/android -name '*.java')
+(cd "$OUT/classes" && jar --create --file ../classes.jar .)
 
-"$D8" --min-api 23 --lib "$JAR" --release --output "$OUT/dex" $(find "$OUT/classes" -name '*.class')
+java -cp "$R8_JAR" com.android.tools.r8.R8 --release --min-api "$MIN_SDK" \
+    --lib "$JAR" --pg-conf proguard-rules.pro --pg-conf "$OUT/aapt-rules.pro" \
+    --pg-map-output "$OUT/mapping.txt" --output "$OUT/dex" "$OUT/classes.jar"
 
-cp "$OUT/res.apk" "$OUT/unsigned.apk"
-(cd "$OUT/dex" && zip -q -X ../unsigned.apk classes.dex)
-"$ZIPALIGN" -p -f 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
+# Bundle module layout: manifest/, dex/, res/, assets/, resources.pb.
+(cd "$OUT/base" && unzip -q ../proto.zip && mv AndroidManifest.xml manifest/)
+cp "$OUT/dex/classes.dex" "$OUT/base/dex/"
+(cd "$OUT/base" && zip -q -X -r ../base.zip .)
 
-"$APKSIGNER" sign --ks "$KS" --ks-pass env:KEYSTORE_PASS --ks-key-alias tuner \
-    --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
-    --out "$OUT/Tuner.apk" "$OUT/aligned.apk"
-"$APKSIGNER" verify "$OUT/Tuner.apk"
-echo "built $OUT/Tuner.apk ($(stat -c %s "$OUT/Tuner.apk") bytes, $VERSION_NAME / $VERSION_CODE)"
+"$BUNDLETOOL" build-bundle --modules="$OUT/base.zip" --output="$OUT/Tuner.aab" \
+    --metadata-file=com.android.tools.build.obfuscation/proguard.map:"$OUT/mapping.txt"
+# Upload certificates are self-signed by design; jarsigner's warning about that is noise.
+jarsigner -keystore "$KS" -storepass:env KEYSTORE_PASS -keypass:env KEYSTORE_PASS \
+    -sigalg SHA256withRSA -digestalg SHA-256 "$OUT/Tuner.aab" "$KS_ALIAS" >/dev/null
+jarsigner -verify "$OUT/Tuner.aab" | grep '^jar verified' >/dev/null \
+    || { echo "error: $OUT/Tuner.aab signature does not verify" >&2; exit 1; }
+"$BUNDLETOOL" validate --bundle="$OUT/Tuner.aab" >/dev/null
+
+"$BUNDLETOOL" build-apks --bundle="$OUT/Tuner.aab" --output="$OUT/Tuner.apks" --mode=universal \
+    --ks="$KS" --ks-key-alias="$KS_ALIAS" \
+    --ks-pass=file:<(printf %s "$KEYSTORE_PASS") --key-pass=file:<(printf %s "$KEYSTORE_PASS")
+unzip -q -p "$OUT/Tuner.apks" universal.apk > "$OUT/Tuner.apk"
+java --enable-native-access=ALL-UNNAMED -jar "$BT/lib/apksigner.jar" verify "$OUT/Tuner.apk"
+
+echo "built $OUT/Tuner.aab ($(stat -c %s "$OUT/Tuner.aab") bytes), $OUT/Tuner.apk ($(stat -c %s "$OUT/Tuner.apk") bytes), $VERSION_NAME / $VERSION_CODE"

@@ -1,23 +1,47 @@
-# Tuner
+# Guitar Tuner – Spot On
 
 Guitar tuner for Android in the Hairline design language it shares with Level (`hairline/`, see
 its DESIGN.md): flat colour, hairlines, single accent, circle motif, centred column, named themes
-chosen in Settings.
+chosen in Settings. Package `me.saatvik.tuner`; Android 7.0 (API 24) and later;
+[privacy policy](https://saatvik333.github.io/guitar-tuner-site/privacy).
+
+<p>
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/1.png" width="13%" alt="Easy, Aurum theme: the top string 35 cents flat, Tighten">
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/2.png" width="13%" alt="Easy, Salvia theme: three strings tuned, the fourth reaching pitch">
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/3.png" width="13%" alt="Advanced, Celeste theme: the A string 12 cents sharp">
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/4.png" width="13%" alt="Advanced, Notte theme: the D string in tune, E and A tuned">
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/5.png" width="13%" alt="Strum check, Ambra theme: 4 of 6 strings in tune">
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/6.png" width="13%" alt="Drop D, Rosa theme: the low D 8 cents flat">
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/7.png" width="13%" alt="Settings, Aurum theme">
+</p>
 
 ## Build
 
-Gradle-free. Needs a JDK, `zip`, python3 with PIL, and two Android SDK packages:
+Gradle-free: aapt2 → javac → R8 → bundletool. Needs the Android SDK (`platforms;android-36`,
+`build-tools;36.0.0`, `cmdline-tools;latest`), JDK 17+, [bundletool](https://github.com/google/bundletool),
+python3 with Pillow, and zip.
 
-    sdkmanager "platforms;android-36" "build-tools;36.0.0"
-    KEYSTORE_PASS=... ./build.sh                   # -> build/Tuner.apk (v1+v2+v3, minSdk 23, compile/targetSdk 36)
-    KEYSTORE_PASS=... NEW_KEYSTORE=1 ./build.sh    # first build only: creates keystore/tuner.jks
+    ./build.sh                     # build/Tuner.aab (Play), build/Tuner.apk (universal), build/mapping.txt
+    NEW_KEYSTORE=1 ./build.sh      # first build on a machine without the upload key: creates one
 
 The SDK is found through `ANDROID_SDK_ROOT`, `ANDROID_HOME` or `ANDROID_SDK` (`/usr/lib/android-sdk`
-if none is set); `BUILD_TOOLS` and `PLATFORM_JAR` override the newest build-tools and the API 36
-jar. Every build that should install over an earlier one must be signed with the same key, so back
-the keystore up. The version comes from `VERSION` (code = major x 10000 + minor x 100 + patch);
-`VERSION_CODE` / `VERSION_NAME` override it. Google Play needs an .aab, which this script does not
-produce yet (needs `bundletool`).
+if none is set); `BUILD_TOOLS`, `PLATFORM_JAR`, `R8_JAR` and `BUNDLETOOL` override the newest
+build-tools, the API 36 jar, R8 and the bundletool on PATH. minSdk 24, compile and targetSdk 36.
+
+The upload key lives outside the repository at `~/.local/share/guitar-tuner-android/upload.jks`
+(`KEYSTORE` overrides it, `KEYSTORE_ALIAS` its alias `upload`). Its password comes from
+`KEYSTORE_PASS` or the desktop keyring (`secret-tool lookup service guitar-tuner-android key upload-keystore`).
+`VERSION_CODE` / `VERSION_NAME` override the version (default 1 / 1.0.0); every Play upload needs a
+higher `VERSION_CODE`. `build/Tuner.apk` is signed with the upload key, so it cannot update a Play
+install (Play signs with its own app key) or the reverse.
+
+Publishing on Google Play, with every Play Console answer: [docs/play-console.md](docs/play-console.md).
+Store text and graphics live in `fastlane/metadata/android/en-US/`. `tools/make_icons.py` (run by
+`build.sh`) writes the launcher PNGs and the 512 px store icon, `tools/make_feature_graphic.py` the
+feature graphic. `tools/store_screenshots.sh` recaptures every screenshot from `build/Tuner.apk` on
+the emulator (`AVD`, default `pixel`) with real readings: it feeds the emulator's virtual microphone
+plucked strings from `tools/pluck.py` through a PulseAudio/PipeWire null sink, so the computer's own
+microphone and speakers are never used, and stops the emulator when done.
 
 The design system lives in `hairline/`, a subtree of the Hairline library: `build.sh` compiles
 `hairline/src` and `hairline/android` with the app and links the Rubik fonts from
@@ -28,11 +52,12 @@ describe this phone only.
 
 ## Layout
 
-    src/app/tuner/guitar/
+    src/me/saatvik/tuner/
       PitchEngine.java   streaming pitch detection (no Android deps)
       Tracker.java       target note/string, smoothing, in-tune state (no Android deps)
       Tuning.java        tunings, note math
       Guide.java         what the guided page says: status and wording (no Android deps)
+      StrumAnalyzer.java the strum check: every string of one strum measured at once (no Android deps)
       Renderer.java      the dial, the guide, the bottom bar and the settings rows, android.graphics only
       Ui.java            the frame's state: written by TunerView, read by Renderer
       TunerView.java     animation, input, haptics, what each control says to accessibility services;
@@ -46,12 +71,15 @@ describe this phone only.
                          keyboard), Chrome (edge to edge, bars, insets, back, fonts), Themes (built-ins
                          and Material You Wallpaper), Rubik, and the AWT stubs for the JVM preview
     tools/preview/       Preview renders Renderer on the JVM; EngineTest, GuideTest
+    tools/               make_icons.py, make_feature_graphic.py, store_screenshots.sh and pluck.py (Build)
+    fastlane/            Play Store text, changelogs and graphics
+    docs/play-console.md every Play Console answer
 
     javac -d /tmp/pv $(find tools/preview hairline/preview hairline/src -name '*.java') \
-        src/app/tuner/guitar/{Ui,Renderer,Tuning,PitchEngine,Tracker,StrumAnalyzer,Guide}.java
-    java -cp /tmp/pv app.tuner.guitar.EngineTest
-    java -cp /tmp/pv app.tuner.guitar.GuideTest
-    java -Djava.awt.headless=true -cp /tmp/pv app.tuner.guitar.Preview hairline/assets/fonts /tmp/shots
+        src/me/saatvik/tuner/{Ui,Renderer,Tuning,PitchEngine,Tracker,StrumAnalyzer,Guide}.java
+    java -cp /tmp/pv me.saatvik.tuner.EngineTest
+    java -cp /tmp/pv me.saatvik.tuner.GuideTest
+    java -Djava.awt.headless=true -cp /tmp/pv me.saatvik.tuner.Preview hairline/assets/fonts /tmp/shots
 
 Capture runs from start to stop, so a visible split-screen pane keeps listening without focus.
 Rotation, dark mode, font size or process death restore the tab, settings page, pause, tuned

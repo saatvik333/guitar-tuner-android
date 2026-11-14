@@ -1,0 +1,1 @@
+First release: guided tuning string by string, the Advanced dial, strum check, 13 tunings for guitar, 7-string, bass and ukulele plus a chromatic mode, a reference tone, six colour themes and a wallpaper theme on Android 12+.
