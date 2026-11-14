@@ -14,7 +14,6 @@ final class Settings {
     boolean flats;
     boolean haptics = true;
     boolean keepOn = true;
-    boolean guideSeen;           // the guided page opens once, on first launch
     boolean guideAuto = true;    // guided page: switch strings automatically
 
     void load(SharedPreferences p) {
@@ -27,7 +26,6 @@ final class Settings {
         flats = p.getBoolean("flats", flats);
         haptics = p.getBoolean("haptics", haptics);
         keepOn = p.getBoolean("keepOn", keepOn);
-        guideSeen = p.getBoolean("guideSeen", guideSeen);
         guideAuto = p.getBoolean("guideAuto", guideAuto);
     }
 
@@ -41,7 +39,6 @@ final class Settings {
                 .putBoolean("flats", flats)
                 .putBoolean("haptics", haptics)
                 .putBoolean("keepOn", keepOn)
-                .putBoolean("guideSeen", guideSeen)
                 .putBoolean("guideAuto", guideAuto)
                 .apply();
     }

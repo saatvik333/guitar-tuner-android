@@ -1,8 +1,8 @@
 package app.tuner.guitar;
 
 /**
- * Streaming monophonic pitch detector. No Android dependencies: fed PCM samples, it produces one
- * analysis per hop.
+ * Streaming pitch detector for guitar strings. No Android dependencies: fed PCM samples, it
+ * produces one analysis per hop.
  *
  * Per hop (W/4 samples over a W-sample window, W ~ 85 ms):
  * 1. Band limit while streaming: 2nd-order Butterworth high-pass 25 Hz and low-pass 3 kHz.
@@ -23,13 +23,21 @@ package app.tuner.guitar;
  *    the lowest harmonics of the composite that start a series of their own; the one followed
  *    is the one that just started (spectral growth since the onset), else the strongest.
  *    Its period is measured after cancelling the other note with a comb filter
- *    y(n) = x(n) - x(n - T_other), which leaves it alone and periodic.
- * 8. Plucks and strums: an onset is a jump of 6 dB in the energy of the newest hop over the hops
- *    two and three back. A single string turns periodic within a few hops of its onset; several
- *    strings at once (a strum, a chord) are not periodic within the lag range. When at most one
- *    of the five hops after an onset is voiced while the level stays up, the sound is
- *    polyphonic: no pitch is reported until the next onset, and from 150 ms after the onset a
- *    long window (~0.7 s) is handed over for {@link StrumAnalyzer}.
+ *    y(n) = x(n) - x(n - T_other), which leaves it alone and periodic. A string plucked on the
+ *    harmonics of a ringing one (high E over low E) is found by the same growth test and
+ *    measured after a comb sum that keeps only the harmonics the two share.
+ * 8. Onsets: a jump of 6 dB in the energy of the newest hop over the hops two and three back, or
+ *    a spectral flux over 0.22 (new partials while another string rings add only ~3 dB).
+ * 9. Strums and chords. A single string turns periodic within a few hops of its onset; several
+ *    at once are not periodic within the lag range, but their spectrum is all peaks (flatness
+ *    under 0.14; claps, rustle and speech are flat, 0.2 - 0.6, and never count). The sound is
+ *    polyphonic, and no pitch is reported until the next onset, when after the onset
+ *    - at most one of hops 2..6 is voiced while at least two are loud and tonal, or
+ *    - from hop 7 to 30, four loud tonal hops in a row are unvoiced (a slow strum), or
+ *    - four hops within 24 of the onset look like three notes or more, or like a period below
+ *      the lowest string (a chord whose notes share a period).
+ *    From 150 ms after the onset a long window (up to 0.75 s) is handed over for
+ *    {@link StrumAnalyzer}.
  */
 final class PitchEngine {
     static final double F_MIN = 25.0, F_MAX = 1500.0;
@@ -40,6 +48,7 @@ final class PitchEngine {
     private static final double GATE_DB = 8.0, ABS_MIN_DB = -85.0, SILENT_DB = -110.0;
     private static final double ONSET_DB = 6.0, FLUX_ON = 0.22;
     private static final int POLY_HOPS = 6;                    // decide on hops 2..6 after an onset
+    private static final int CHORD_HOPS = 24;                  // chord-like hops count until here
 
     final int fs, W, hop, N;
     private final int minLag, maxLag, nLen;
@@ -52,22 +61,21 @@ final class PitchEngine {
     private final double[] frame, hann, re, im, px, spec, nsdf, prevSpec, specBefore, comb;
     private boolean haveBefore;
     private double focusHz = Double.NaN;            // the note followed while two ring together
-    /** Diagnostics: 1 when this frame's period was a common period of two notes. */
-    int composite;
-    double flux;
+    /** Positive change of the magnitude spectrum since the last frame over the current one: ~0 for a ringing note. */
+    private double flux;
     /** Spectral flatness 60 Hz - 2 kHz: ~0 for strings (peaks), ~0.5 for noise, claps, rustle. */
-    double flatness;
-    /** Three notes or more in this frame. */
-    boolean chordLike;
+    private double flatness;
+    /** Three notes or more in this frame, or a period below the lowest string. */
+    private boolean chordLike;
     /**
      * Lowest pitch a single string can sound, set from the selected tuning (lowest string, 600
-     * cents of slack); {@link #F_MIN} for chromatic. Written by the UI thread, read per frame.
+     * cents of slack); {@link #F_MIN} for chromatic. The capture thread copies it from
+     * {@link AudioInput} before every read.
      */
-    volatile double minHz = F_MIN;
+    double minHz = F_MIN;
     private double otherHz = Double.NaN;
     private final double[] pkF = new double[96], pkP = new double[96];
-    private final double[] cosT, sinT;
-    private final int[] rev;
+    private final Fft fft;
 
     // ---- results of the last analysis (read after feed() reports a frame) ---------------------
     /** Detected fundamental, Hz, valid when {@link #voiced}; otherwise the raw estimate or NaN. */
@@ -82,7 +90,6 @@ final class PitchEngine {
     double time;
     /** Diagnostics: 1 = octave check lowered the estimate, 0 otherwise. */
     int octaveFix;
-    double subRatio;
     /** A pluck (or strum) began in the newest hop. */
     boolean onset;
     /** Several notes at once since the last onset; {@link #voiced} stays false meanwhile. */
@@ -122,15 +129,7 @@ final class PitchEngine {
         prevSpec = new double[N / 2 + 1];
         specBefore = new double[N / 2 + 1];
         comb = new double[W];
-        cosT = new double[N / 2];
-        sinT = new double[N / 2];
-        for (int i = 0; i < N / 2; i++) {
-            cosT[i] = Math.cos(2.0 * Math.PI * i / N);
-            sinT[i] = Math.sin(2.0 * Math.PI * i / N);
-        }
-        rev = new int[N];
-        int bits = Integer.numberOfTrailingZeros(N);
-        for (int i = 0; i < N; i++) rev[i] = Integer.reverse(i) >>> (32 - bits);
+        fft = new Fft(N);
         // the longest power of two up to 0.75 s: 48 kHz 32768 (0.68 s, 1.5 Hz bins), 44.1 kHz
         // 32768, 22.05 kHz 16384, 16 kHz 8192 (0.51 s; a longer one asks too much of a strum)
         int sn = 8192;
@@ -159,18 +158,7 @@ final class PitchEngine {
         return n;
     }
 
-    /** Float input, same contract as {@link #feed(short[], int, int)}. */
-    int feed(float[] x, int off, int n) {
-        ready = false;
-        for (int i = 0; i < n; i++) {
-            if (push(x[off + i])) {
-                ready = true;
-                return i + 1;
-            }
-        }
-        return n;
-    }
-
+    /** Whether the last {@link #feed} call completed a hop and analysed a frame. */
     boolean ready;
 
     private boolean push(double x) {
@@ -185,29 +173,6 @@ final class PitchEngine {
         sinceHop = 0;
         analyze();
         return true;
-    }
-
-    void reset() {
-        hp.clear();
-        lp.clear();
-        java.util.Arrays.fill(ring, 0.0);
-        pos = sinceHop = 0;
-        count = 0;
-        freq = Double.NaN;
-        clarity = 0;
-        voiced = false;
-        levelDb = -120.0;
-        floorDb = Double.NaN;
-        silentSec = 0;
-        java.util.Arrays.fill(hist, 0f);
-        histPos = 0;
-        java.util.Arrays.fill(hopDb, -200.0);
-        java.util.Arrays.fill(prevSpec, 0.0);
-        haveBefore = false;
-        focusHz = Double.NaN;
-        sinceOnset = 1 << 20;
-        poly = onset = strumPending = false;
-        strum = null;
     }
 
     // ---- analysis ----------------------------------------------------------------------------
@@ -231,8 +196,6 @@ final class PitchEngine {
         silentSec = levelDb < SILENT_DB ? silentSec + hopSec : 0.0;
 
         octaveFix = 0;
-        subRatio = 0;
-        composite = 0;
         chordLike = false;
         otherHz = Double.NaN;
         double lag = ss > 1e-18 ? period(ss) : -1.0;
@@ -310,12 +273,13 @@ final class PitchEngine {
             else if (loud && tonal) onsetTonal++;
         }
         loudUnvoiced = !voiced && loud && tonal ? loudUnvoiced + 1 : 0;
-        if (chordLike && flatness < 0.25 && sinceOnset >= 2 && sinceOnset <= 24) onsetChords++;
+        if (chordLike && flatness < 0.25 && sinceOnset >= 2 && sinceOnset <= CHORD_HOPS) onsetChords++;
         if (!poly && loud && (sinceOnset == POLY_HOPS && onsetVoiced <= 1 && onsetTonal >= 2
                 // a slow strum: one string alone at first, periodic, then the others join
                 || sinceOnset > POLY_HOPS && sinceOnset <= 30 && loudUnvoiced >= 4
-                // a chord whose notes share a period (D A D G A D) flickers between the two
-                || onsetChords >= 4)) {
+                // a chord whose notes share a period (D A D G A D) never settles on one string; only
+                // soon after its pluck: later the count is stale (a swell of noise would complete it)
+                || sinceOnset <= CHORD_HOPS && onsetChords >= 4)) {
             poly = true;
             strumPending = true;
             polySample = count;
@@ -347,7 +311,7 @@ final class PitchEngine {
             re[i] = 0.0;
             im[i] = 0.0;
         }
-        fft(re, im);
+        fft.transform(re, im);
         int mask = N - 1;
         for (int k = 0; k <= N / 2; k++) {
             int j = (N - k) & mask;
@@ -356,21 +320,24 @@ final class PitchEngine {
             px[k] = (sr * sr + si * si) * 0.25;
             spec[k] = (dr * dr + di * di) * 0.25;
         }
-        // Power spectrum is real and even, so a forward transform gives N * autocorrelation.
-        for (int k = 0; k <= N / 2; k++) {
-            re[k] = px[k];
-            im[k] = 0.0;
-            if (k > 0 && k < N / 2) {
-                re[N - k] = px[k];
-                im[N - k] = 0.0;
-            }
+        // The power spectrum is real and even, so its transform is N x the autocorrelation. A real
+        // input needs only a half-size complex FFT: even samples as the real part, odd as the
+        // imaginary part, then split into the two real transforms and recombined.
+        int half = N / 2;
+        for (int i = 0; i < half; i++) {
+            int a = 2 * i, b = a + 1;
+            re[i] = px[a <= half ? a : N - a];
+            im[i] = px[b <= half ? b : N - b];
         }
-        fft(re, im);
+        fft.transform(re, im, half);
         double invN = 1.0 / N;
         double m = 2.0 * ss;
         for (int t = 0; t < nLen; t++) {
+            int j = (half - t) & (half - 1);
+            double dr = re[t] - re[j], di = im[t] + im[j];
+            double r = 0.5 * (re[t] + re[j]) + fft.cos[t] * 0.5 * di - fft.sin[t] * 0.5 * dr;
             if (t > 0) m -= frame[t - 1] * frame[t - 1] + frame[W - t] * frame[W - t];
-            nsdf[t] = m > 1e-20 ? 2.0 * re[t] * invN / m : 0.0;
+            nsdf[t] = m > 1e-20 ? 2.0 * r * invN / m : 0.0;
         }
 
         // key maxima: highest point of each positive lobe after the first zero crossing
@@ -417,7 +384,6 @@ final class PitchEngine {
             double g = fs / (p * d);
             if (g < F_MIN || p * d > maxLag) continue;
             double r = subharmonicRatio(g, d);
-            if (d == 2) subRatio = r;
             if (r < SUB_RATIO) continue;
             int at = localMax(p * d, 2 + d);
             if (at < 0 || nsdf[at] < 0.6 || nsdf[at] < 0.8 * clarity) continue;
@@ -509,9 +475,8 @@ final class PitchEngine {
         }
         // the note followed so far sits at f itself: its own tail with dull upper partials (a
         // pluck at a fifth of the string, a steep microphone roll-off), not two notes
-        if (fifth && !Double.isNaN(focusHz) && Math.abs(1200.0 * Math.log(focusHz / f) / Math.log(2.0)) < 60.0) fifth = false;
+        if (fifth && !Double.isNaN(focusHz) && Math.abs(Tuning.cents(focusHz, f)) < 60.0) fifth = false;
         if (!below && !fifth && (harm[1] >= 0.02 * max || harm[2] >= 0.02 * max)) return upperNote(p, f, kc, max);
-        composite = 1;
         int kFrom = harm[2] >= 0.02 * max ? 2 : 3;
 
         // notes: harmonics of the composite that start a series of their own
@@ -549,7 +514,7 @@ final class PitchEngine {
         double best = -1.0;
         if (!Double.isNaN(focusHz)) {
             for (int i = 0; i < nc; i++) {
-                double c = Math.abs(1200.0 * Math.log(cand[i] * f / focusHz) / Math.log(2.0));
+                double c = Math.abs(Tuning.cents(cand[i] * f, focusHz));
                 if (c < 60.0 && (pick < 0 || c < best)) {
                     pick = i;
                     best = c;
@@ -612,8 +577,7 @@ final class PitchEngine {
         for (int k = lo; k <= hi && np < pkF.length; k++) {
             double v = spec[k];
             if (v < 1e-2 * max || v <= spec[k - 1] || v < spec[k + 1]) continue;     // -20 dB: clear of window sidelobes
-            double a = Math.log(spec[k - 1] + 1e-300), b = Math.log(v), c = Math.log(spec[k + 1] + 1e-300);
-            double den = a - 2.0 * b + c, d = den < 0.0 ? Math.max(-0.5, Math.min(0.5, 0.5 * (a - c) / den)) : 0.0;
+            double d = vertex(Math.log(spec[k - 1] + 1e-300), Math.log(v), Math.log(spec[k + 1] + 1e-300));
             pkF[np] = (k + d) / binPerHz;
             pkP[np] = v;
             total += v;
@@ -631,10 +595,11 @@ final class PitchEngine {
         }
         if (off <= 0.12 * total) return false;
         if (!Double.isNaN(f2)) return true;
-        // a second string ringing, whose fundamental (or 2nd, 3rd harmonic) is the strongest stray peak
+        // a second string ringing, whose fundamental (or 2nd, 3rd harmonic) is the strongest stray
+        // peak; a fundamental below the lowest string is no string (55 Hz, or lower on a bass)
         for (int d = 1; d <= 3; d++) {
             double g = uf / d;
-            if (g < 55.0) break;
+            if (g < Math.min(55.0, minHz)) break;
             double rest = 0.0;
             for (int i = 0; i < np; i++) {
                 if (!onSeries(pkF[i], f) && !onSeries(pkF[i], g)) rest += pkP[i];
@@ -648,7 +613,7 @@ final class PitchEngine {
     private static boolean onSeries(double x, double f) {
         double k = Math.round(x / f);
         if (k < 1.0) return false;
-        double c = Math.abs(1200.0 * Math.log(x / (k * f)) / Math.log(2.0));
+        double c = Math.abs(Tuning.cents(x, k * f));
         return c < 40.0 + 2.0 * k;
     }
 
@@ -662,7 +627,7 @@ final class PitchEngine {
         if (!Double.isNaN(focusHz)) {
             double r = focusHz / f;
             int ri = (int) Math.round(r);
-            if (ri >= 2 && ri <= 4 && Math.abs(1200.0 * Math.log(r / ri) / Math.log(2.0)) < 30.0) d = ri;
+            if (ri >= 2 && ri <= 4 && Math.abs(Tuning.cents(r, ri)) < 30.0) d = ri;
         }
         if (d == 0 && haveBefore && sinceOnset >= 1 && sinceOnset < 12) {
             double total = 0.0;
@@ -693,7 +658,6 @@ final class PitchEngine {
         } else {
             clarity = Math.min(1.0, Math.max(clarity, peakValue));
         }
-        composite = 2;
         return lag;
     }
 
@@ -753,9 +717,9 @@ final class PitchEngine {
         }
         if (bi < 2) return -1.0;
         double a = directNsdf(comb, len, bi - 1), b = bv, e = directNsdf(comb, len, bi + 1);
-        double den = a - 2.0 * b + e, off = den < 0.0 ? Math.max(-0.5, Math.min(0.5, 0.5 * (a - e) / den)) : 0.0;
+        double off = vertex(a, b, e);
         double one = directNsdf(comb, len, (int) Math.round(lagC));
-        clarity = Math.min(1.0, Math.max(one, b - 0.25 * (a - e) * off));
+        clarity = Math.min(1.0, Math.max(one, peak(a, b, e, off)));
         double lag = (bi + off) / m;
         return Math.abs(lag - lagC) < 0.03 * lagC ? lag : -1.0;
     }
@@ -793,16 +757,23 @@ final class PitchEngine {
     /** Parabolic interpolation around index i; sets {@link #peakValue}. */
     private double interp(int i) {
         double a = nsdf[i - 1], b = nsdf[i], c = nsdf[i + 1];
-        double den = a - 2.0 * b + c;
-        if (den >= 0.0) {
-            peakValue = b;
-            return i;
-        }
-        double d = 0.5 * (a - c) / den;
-        if (d > 0.5) d = 0.5;
-        if (d < -0.5) d = -0.5;
-        peakValue = b - 0.25 * (a - c) * d;
+        double d = vertex(a, b, c);
+        peakValue = peak(a, b, c, d);
         return i + d;
+    }
+
+    /**
+     * Offset in samples or bins (-0.5..0.5) of the vertex of the parabola through three equally
+     * spaced points, 0 unless the middle one is a strict maximum.
+     */
+    static double vertex(double a, double b, double c) {
+        double den = a - 2.0 * b + c;
+        return den < 0.0 ? Math.max(-0.5, Math.min(0.5, 0.5 * (a - c) / den)) : 0.0;
+    }
+
+    /** Height of that parabola at offset d from the middle point. */
+    static double peak(double a, double b, double c, double d) {
+        return b - 0.25 * (a - c) * d;
     }
 
     /**
@@ -847,31 +818,53 @@ final class PitchEngine {
         return best;
     }
 
-    /** In-place iterative radix-2 forward FFT. */
-    private void fft(double[] xr, double[] xi) {
-        for (int i = 0; i < N; i++) {
-            int j = rev[i];
-            if (j > i) {
-                double tr = xr[i];
-                xr[i] = xr[j];
-                xr[j] = tr;
-                double ti = xi[i];
-                xi[i] = xi[j];
-                xi[j] = ti;
+    /** In-place radix-2 forward FFT with the twiddle factors of one size, shared by the pitch and strum analysis. */
+    static final class Fft {
+        private final int n;
+        /** cos and sin of 2 pi k / n, k < n / 2. */
+        final double[] cos, sin;
+
+        Fft(int n) {
+            this.n = n;
+            cos = new double[n / 2];
+            sin = new double[n / 2];
+            for (int i = 0; i < n / 2; i++) {
+                cos[i] = Math.cos(2.0 * Math.PI * i / n);
+                sin[i] = Math.sin(2.0 * Math.PI * i / n);
             }
         }
-        for (int size = 2; size <= N; size <<= 1) {
-            int half = size >> 1, step = N / size;
-            for (int i = 0; i < N; i += size) {
-                for (int j = 0, k = 0; j < half; j++, k += step) {
-                    double wr = cosT[k], wi = -sinT[k];
-                    int a = i + j, b = a + half;
-                    double tr = xr[b] * wr - xi[b] * wi;
-                    double ti = xr[b] * wi + xi[b] * wr;
-                    xr[b] = xr[a] - tr;
-                    xi[b] = xi[a] - ti;
-                    xr[a] += tr;
-                    xi[a] += ti;
+
+        void transform(double[] xr, double[] xi) {
+            transform(xr, xi, n);
+        }
+
+        /** Transforms the first {@code size} points, a power of two dividing n. */
+        void transform(double[] xr, double[] xi, int size) {
+            int shift = 32 - Integer.numberOfTrailingZeros(size);
+            for (int i = 0; i < size; i++) {
+                int j = Integer.reverse(i) >>> shift;
+                if (j > i) {
+                    double tr = xr[i];
+                    xr[i] = xr[j];
+                    xr[j] = tr;
+                    double ti = xi[i];
+                    xi[i] = xi[j];
+                    xi[j] = ti;
+                }
+            }
+            for (int len = 2; len <= size; len <<= 1) {
+                int half = len >> 1, step = n / len;
+                for (int i = 0; i < size; i += len) {
+                    for (int j = 0, k = 0; j < half; j++, k += step) {
+                        double wr = cos[k], wi = -sin[k];
+                        int a = i + j, b = a + half;
+                        double tr = xr[b] * wr - xi[b] * wi;
+                        double ti = xr[b] * wi + xi[b] * wr;
+                        xr[b] = xr[a] - tr;
+                        xi[b] = xi[a] - ti;
+                        xr[a] += tr;
+                        xi[a] += ti;
+                    }
                 }
             }
         }

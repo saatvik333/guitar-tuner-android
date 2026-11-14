@@ -5,23 +5,26 @@ import java.util.Arrays;
 /**
  * Polyphonic check of a strum. No Android dependencies.
  *
- * <p>Given ~0.35 s of audio taken after the attack of a strum, it answers three questions:
+ * <p>Given 0.51 - 0.74 s of audio taken after the attack of a strum (see
+ * {@link PitchEngine#strumN}), it answers three questions:
  * <ol>
  * <li>Is this the open strings, or a fretted chord? Pitch-class profile against the open strings
- *     of every tuning and against major, minor and power chords.</li>
+ *     of every tuning and against major, minor, power and 7th chords.</li>
  * <li>If open strings: where is each string? Every string is searched within its own range
  *     (up to +-250 cents, never overlapping a neighbour's) by harmonic sum over spectral peaks.
  *     Open strings share partials (E2's 3rd is B3, its 4th is E4; A2's 3rd is E4 ...). A partial
  *     is credited to the string for which it is the lowest harmonic, the one that dominates it;
- *     the others skip it. Estimates are refined twice with the collisions recomputed.</li>
+ *     the others skip it. Estimates are refined four times with the collisions recomputed.</li>
  * <li>Does another tuning fit clearly better (the guitar is in Drop D, or a half step down)?</li>
  * </ol>
  * Long window: 32768 samples at 48 kHz (0.68 s, 1.5 Hz bins), log-parabolic peak interpolation.
+ * An instance holds the working state of one strum: make a new one for each.
  */
 final class StrumAnalyzer {
 
     static final int KMAX = 8;
     private static final int ITERATIONS = 4;
+    private static final int PARTIALS = 16;                    // harmonics of each string tracked
     private static final double FMIN = 55.0, FMAX = 2600.0;
 
     static final class Result {
@@ -46,7 +49,7 @@ final class StrumAnalyzer {
     }
 
     // spectral peaks, ascending frequency
-    private double[] pf = new double[0], pa = new double[0];
+    private double[] pf, pa;
     private int np;
     private double binHz, peakMax;
 
@@ -62,6 +65,9 @@ final class StrumAnalyzer {
             r.chord = true;
             return r;
         }
+        lf = new double[n * PARTIALS];
+        lm = new int[n * PARTIALS];
+        ls = new int[n * PARTIALS];
         spectrum(x, fs);
         if (np < 3) {
             r.chord = true;
@@ -82,7 +88,7 @@ final class StrumAnalyzer {
             double w = worst(o);
             int diff = 0;
             for (int s = 0; s < n; s++) if (t.strings[s] != tuning.strings[s]) diff++;
-                if (o.heard < n - 1 || w >= 25.0) continue;
+            if (o.heard < n - 1 || w >= 25.0) continue;
             boolean better = o.heard > bestHeard
                     || o.heard == bestHeard && (diff < bestDiff || diff == bestDiff && w < bestWorst);
             if (better) {
@@ -97,7 +103,7 @@ final class StrumAnalyzer {
             Tuning t = Tuning.ALL[best];
             if (t == tuning || selWorst <= 60.0 && r.heard >= bestHeard) return r;   // open strings, this tuning
             // An open tuning is a major chord: far more often that chord, fretted.
-            if (!t.name.startsWith("Open")) {
+            if (!t.openChord) {
                 r.suggest = best;
                 return r;
             }
@@ -128,19 +134,11 @@ final class StrumAnalyzer {
 
     // ---- spectrum and peaks ------------------------------------------------------------------
 
-    private double[] re = new double[0], im = new double[0];
-
     private void spectrum(float[] x, int fs) {
         int N = x.length;
-        if (re.length != N) {
-            re = new double[N];
-            im = new double[N];
-        }
-        for (int i = 0; i < N; i++) {
-            re[i] = x[i] * (0.5 - 0.5 * Math.cos(2.0 * Math.PI * i / N));
-            im[i] = 0.0;
-        }
-        fft(re, im);
+        double[] re = new double[N], im = new double[N];
+        for (int i = 0; i < N; i++) re[i] = x[i] * (0.5 - 0.5 * Math.cos(2.0 * Math.PI * i / N));
+        new PitchEngine.Fft(N).transform(re, im);
         int half = N / 2;
         double[] mag = new double[half + 1];
         for (int k = 0; k <= half; k++) mag[k] = Math.hypot(re[k], im[k]);
@@ -154,21 +152,17 @@ final class StrumAnalyzer {
         double noise = band[band.length / 2];
         double thr = Math.max(noise * 4.0, max * 1e-3);           // +12 dB over the median, -60 dB under the top
 
-        if (pf.length < hi) {
-            pf = new double[hi];
-            pa = new double[hi];
-        }
+        pf = new double[(hi - lo + 2) / 2];                       // peaks are never adjacent
+        pa = new double[pf.length];
         np = 0;
         peakMax = max;
         for (int k = lo; k <= hi; k++) {
             double m = mag[k];
             if (m <= thr || m <= mag[k - 1] || m < mag[k + 1]) continue;
             double a = Math.log(mag[k - 1] + 1e-30), b = Math.log(m + 1e-30), c = Math.log(mag[k + 1] + 1e-30);
-            double den = a - 2.0 * b + c, d = den < 0.0 ? 0.5 * (a - c) / den : 0.0;
-            if (d > 0.5) d = 0.5;
-            if (d < -0.5) d = -0.5;
+            double d = PitchEngine.vertex(a, b, c);
             pf[np] = (k + d) * binHz;
-            pa[np] = Math.exp(b - 0.25 * (a - c) * d);
+            pa[np] = Math.exp(PitchEngine.peak(a, b, c, d));
             np++;
         }
     }
@@ -200,8 +194,7 @@ final class StrumAnalyzer {
     private void chroma(Result r, Tuning tuning, double a4) {
         double[] chroma = new double[12];
         for (int i = 0; i < np; i++) {
-            double m = 69.0 + 12.0 * Tuning.log2(pf[i] / a4);
-            int pc = (((int) Math.round(m)) % 12 + 12) % 12;
+            int pc = Tuning.pitchClass((int) Math.round(Tuning.midiOf(pf[i], a4)));
             chroma[pc] += pa[i];
         }
         double chord = 0.0;
@@ -222,7 +215,7 @@ final class StrumAnalyzer {
         double[] t = new double[12];
         for (int note : notes) {
             for (int k = 1; k <= HARM_W.length; k++) {
-                int pc = ((note + (int) Math.round(12.0 * Tuning.log2(k))) % 12 + 12) % 12;
+                int pc = Tuning.pitchClass(note + (int) Math.round(12.0 * Tuning.log2(k)));
                 t[pc] += HARM_W[k - 1];
             }
         }
@@ -242,20 +235,15 @@ final class StrumAnalyzer {
     // ---- per-string estimates ----------------------------------------------------------------
 
     // partials of all strings at the current estimates, ascending: frequency, harmonic, string
-    private double[] lf = new double[0];
-    private int[] lm = new int[0], ls = new int[0];
+    private double[] lf;
+    private int[] lm, ls;
     private int nl;
 
-    private void partials(double[] est, int n) {
-        int cap = n * 16;
-        if (lf.length < cap) {
-            lf = new double[cap];
-            lm = new int[cap];
-            ls = new int[cap];
-        }
+    private void partials(double[] est) {
+        int n = est.length;
         nl = 0;
         for (int t = 0; t < n; t++) {
-            for (int m = 1; m <= 16; m++) {
+            for (int m = 1; m <= PARTIALS; m++) {
                 lf[nl] = m * est[t];
                 lm[nl] = m;
                 ls[nl] = t;
@@ -320,7 +308,7 @@ final class StrumAnalyzer {
         for (int s = 0; s < n; s++) {
             double gap = 2400.0;
             for (int t = 0; t < n; t++) {
-                if (t != s) gap = Math.min(gap, Math.abs(1200.0 * Tuning.log2(exp[t] / exp[s])));
+                if (t != s) gap = Math.min(gap, Math.abs(Tuning.cents(exp[t], exp[s])));
             }
             double range = Math.max(60.0, Math.min(250.0, gap / 2.0 - 10.0));
             lo[s] = exp[s] * Math.pow(2.0, -range / 1200.0);
@@ -331,7 +319,7 @@ final class StrumAnalyzer {
         for (int iter = 0; iter < ITERATIONS; iter++) {
             wide = iter == 0;
             collideRatio = Math.pow(2.0, (wide ? 60.0 : 12.0) / 1200.0);
-            partials(est, n);
+            partials(est);
             double[] next = est.clone();
             for (int s = 0; s < n; s++) {
                 double bestF = Double.NaN, bestS = 0.0;
@@ -340,7 +328,7 @@ final class StrumAnalyzer {
                         double f = pf[i] / k;
                         if (f < lo[s]) break;                              // k only lowers f further
                         if (f > hi[s]) continue;
-                        double c = 1200.0 * Tuning.log2(f / exp[s]);
+                        double c = Tuning.cents(f, exp[s]);
                         double v = salience(s, f) / (1.0 + (c / 200.0) * (c / 200.0));   // most strums are near pitch
                         if (v > bestS) {
                             bestS = v;
@@ -367,7 +355,7 @@ final class StrumAnalyzer {
             // like the low D of Drop D) a clear peak of its own among its first partials.
             if (found[s] && low[s] > 0.0 && (sal[s] >= 0.12 * top || low[s] >= 0.03 * peakMax)) {
                 r.hz[s] = est[s];
-                r.cents[s] = 1200.0 * Tuning.log2(est[s] / exp[s]);
+                r.cents[s] = Tuning.cents(est[s], exp[s]);
                 r.heard++;
             }
         }
@@ -420,42 +408,5 @@ final class StrumAnalyzer {
             sf += w * pf[i] / k;
         }
         return sw > 0.0 ? sf / sw : f;
-    }
-
-    // ---- FFT ---------------------------------------------------------------------------------
-
-    private static void fft(double[] xr, double[] xi) {
-        int n = xr.length;
-        for (int i = 1, j = 0; i < n; i++) {
-            int bit = n >> 1;
-            for (; (j & bit) != 0; bit >>= 1) j ^= bit;
-            j ^= bit;
-            if (i < j) {
-                double t = xr[i];
-                xr[i] = xr[j];
-                xr[j] = t;
-                t = xi[i];
-                xi[i] = xi[j];
-                xi[j] = t;
-            }
-        }
-        for (int len = 2; len <= n; len <<= 1) {
-            double ang = -2.0 * Math.PI / len;
-            double wr = Math.cos(ang), wi = Math.sin(ang);
-            for (int i = 0; i < n; i += len) {
-                double cr = 1.0, ci = 0.0;
-                for (int j = 0; j < len / 2; j++) {
-                    int a = i + j, b = a + len / 2;
-                    double tr = xr[b] * cr - xi[b] * ci, ti = xr[b] * ci + xi[b] * cr;
-                    xr[b] = xr[a] - tr;
-                    xi[b] = xi[a] - ti;
-                    xr[a] += tr;
-                    xi[a] += ti;
-                    double nr = cr * wr - ci * wi;
-                    ci = cr * wi + ci * wr;
-                    cr = nr;
-                }
-            }
-        }
     }
 }

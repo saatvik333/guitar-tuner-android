@@ -15,9 +15,7 @@ public class Canvas {
     public int save() { stack.push(new Object[]{g.getTransform(), g.getClip()}); return stack.size(); }
     public void restore() { Object[] st = stack.pop(); g.setTransform((AffineTransform) st[0]); g.setClip((Shape) st[1]); }
     public boolean clipRect(float l, float t, float r, float b) { g.clip(new Rectangle2D.Float(l, t, r - l, b - t)); return true; }
-    public void scale(float sx, float sy, float px, float py) { g.translate(px, py); g.scale(sx, sy); g.translate(-px, -py); }
     public void translate(float x, float y) { g.translate(x, y); }
-    public void rotate(float deg, float px, float py) { g.rotate(Math.toRadians(deg), px, py); }
     private void paint(Shape s, Paint p) {
         g.setColor(new Color(p.color, true));
         if (p.style == Paint.Style.FILL) { g.fill(s); return; }

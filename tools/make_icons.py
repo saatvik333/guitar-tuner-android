@@ -22,14 +22,36 @@ def render(size: int) -> Image.Image:
     def P(x, y):
         return (ox + x * k, ox + y * k)
 
+    def disc(cx, cy, r):
+        x, y = P(cx, cy)
+        return [x - r * k, y - r * k, x + r * k, y + r * k]
+
+    def stroke_px(width):
+        return max(1, round(width * k))
+
+    def ring_box(cx, cy, r, w):
+        # PIL draws an outline inside its box, a VectorDrawable stroke straddles the path:
+        # grow the box by half the stroke so both have the same centreline
+        x, y = P(cx, cy)
+        o = r * k + w / 2
+        return [x - o, y - o, x + o, y + o]
+
     r = vis / 2
     d.ellipse([S / 2 - r, S / 2 - r, S / 2 + r, S / 2 + r], fill=BG)
-    d.ellipse([*P(30, 30), *P(78, 78)], fill=DISC)
-    # dial broken at the top (gap +-28.7 deg), target ring, bead at +40 deg (mirrors res/drawable/ic_fg.xml)
-    gap = math.degrees(math.asin(5.3 / 11.0))
-    d.arc([*P(43, 43), *P(65, 65)], start=270 + gap, end=270 - gap + 360, fill=BG, width=max(1, round(1.8 * k)))
-    d.ellipse([*P(50.2, 39.2), *P(57.8, 46.8)], outline=BG, width=max(1, round(1.5 * k)))
-    d.ellipse([*P(61.07 - 2.8, 45.57 - 2.8), *P(61.07 + 2.8, 45.57 + 2.8)], fill=BG)
+    d.ellipse(disc(54, 54, 24), fill=DISC)
+
+    # dial broken at the top (arc ends at 5.28 units either side of the axis, as in ic_fg.xml),
+    # target ring, bead at +40 deg
+    dial_r = 11.0
+    gap = math.degrees(math.asin(5.28 / dial_r))
+    w = stroke_px(1.8)
+    d.arc(ring_box(54, 54, dial_r, w), start=270 + gap, end=270 - gap + 360, fill=BG, width=w)
+    for a in (270 + gap, 270 - gap):        # round caps: a disc of the stroke's width at each arc end
+        ex, ey = P(54 + dial_r * math.cos(math.radians(a)), 54 + dial_r * math.sin(math.radians(a)))
+        d.ellipse([ex - w / 2, ey - w / 2, ex + w / 2, ey + w / 2], fill=BG)
+    w = stroke_px(1.5)
+    d.ellipse(ring_box(54, 43, 3.8, w), outline=BG, width=w)
+    d.ellipse(disc(61.07, 45.57, 2.8), fill=BG)
     return im.resize((size, size), Image.LANCZOS)
 
 

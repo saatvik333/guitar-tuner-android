@@ -2,11 +2,15 @@ package app.tuner.guitar;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.Insets;
 import android.graphics.Rect;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.DisplayMetrics;
+import android.util.TypedValue;
+import android.view.DisplayCutout;
 import android.view.HapticFeedbackConstants;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -83,7 +87,8 @@ final class TunerView extends View {
     private double gBest;                                 // closest |cents| in this note
     private int gBestSign;
     private boolean gWrongWay, gWasLive;
-    private int gStatus = -1, gStatusArg;
+    private final Guide guide = new Guide();
+    private int gWordsKey = -1;                           // what the title, sub-line and caption were built for
     private double gFollowedOnset = -1.0;                 // onset already checked for another string
     private long gLastHeardNs;
     private boolean gUnheardShown;
@@ -177,9 +182,10 @@ final class TunerView extends View {
         this.themes = themes;
         this.host = host;
         am = (AccessibilityManager) ctx.getSystemService(Context.ACCESSIBILITY_SERVICE);
-        float density = getResources().getDisplayMetrics().density;
-        ui.dp = density;
-        ui.sp = Math.min(getResources().getDisplayMetrics().scaledDensity, density * 1.3f);
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        ui.dp = dm.density;
+        // the font-size setting (non-linear from Android 14), up to 1.3x: larger text no longer fits
+        ui.sp = Math.min(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 1f, dm), dm.density * 1.3f);
         slop = ViewConfiguration.get(ctx).getScaledTouchSlop();
 
         themeIdx = 0;
@@ -225,15 +231,66 @@ final class TunerView extends View {
         }
     }
 
+    /** For recreation (rotation, process death): the tab, its progress and the pause. */
+    void saveState(Bundle out) {
+        out.putBoolean("paused", paused);
+        out.putInt("page", page);
+        out.putInt("basePage", basePage);
+        out.putString("tuning", tuning().name);
+        out.putInt("tuned", tracker.tunedMask);
+        out.putInt("locked", tracker.locked);
+        out.putInt("step", gStep);
+        out.putBoolean("complete", gComplete);
+    }
+
+    /** Right after construction, which lands on Easy: back to where {@link #saveState} left off, unannounced. */
+    void restoreState(Bundle in) {
+        paused = in.getBoolean("paused");
+        if (in.getInt("basePage", PAGE_GUIDE) == PAGE_TUNER) {
+            // landing on Easy turned a chromatic tuning into Standard: Advanced gets its own back
+            int idx = Tuning.indexOf(in.getString("tuning", settings.tuning));
+            if (idx != tuningIdx) {
+                tuningIdx = idx;
+                settings.tuning = tuning().name;
+                applyTuning(true);
+            }
+            page = basePage = PAGE_TUNER;
+            ui.guideT = 0f;
+            applyTrackerMode();
+            int locked = in.getInt("locked", -1);
+            tracker.locked = locked < tuning().count() ? locked : -1;
+        }
+        int n = tuning().count();
+        tracker.tunedMask = in.getInt("tuned") & ((1 << n) - 1);
+        for (int i = 0; i < Ui.MAX_STRINGS; i++) ui.sTunedT[i] = (tracker.tunedMask & (1 << i)) != 0 ? 1f : 0f;
+        if (basePage == PAGE_GUIDE) {
+            int step = in.getInt("step");
+            gStep = step < n ? step : 0;
+            gComplete = in.getBoolean("complete") && n > 0;
+            guideReset(0.0);
+            ui.gCursor = gStep;
+            ui.gDoneT = gComplete ? 1.2f : 0f;
+        }
+        if (in.getInt("page", basePage) == PAGE_SETTINGS) {
+            page = PAGE_SETTINGS;
+            ui.pageT = 1f;
+        }
+    }
+
     // ---- microphone ------------------------------------------------------------------------
 
     void setMic(int state) {
-        if (state != mic) {
-            mic = state;
-            shownState = -1;
-            if (state != MIC_OK) announce(micMessage());
-            invalidate();
-        }
+        if (state == mic) return;
+        mic = state;
+        shownState = -1;
+        if (state != MIC_OK) announce(micMessage());
+        invalidate();
+    }
+
+    /** A permission request was refused: said again even when the message is already showing. */
+    void micRefused(int state) {
+        if (state != mic) setMic(state);
+        else announce(micMessage());
     }
 
     /** Capture (re)started: audio time begins again at zero; frames of older sessions are dropped. */
@@ -303,8 +360,10 @@ final class TunerView extends View {
         long nowNs = System.nanoTime();
         boolean guide = guideMode();
         boolean ignore = toneOn || paused || nowNs < ignoreUntilNs || (guide && gComplete);
-        int strumSig = strumState();
+        int strumSig = strumState(nowNs);
         for (int k = 0; k < n; k++) {
+            float[] strum = dStrum[k];
+            dStrum[k] = null;                        // ~0.7 s of audio: not held until the slot is reused
             boolean v = dV[k] && !ignore && !dPoly[k];
             if (v && guide && gMuteHz > 0.0) {
                 if (nowNs > gMuteUntilNs) gMuteHz = 0.0;
@@ -316,24 +375,27 @@ final class TunerView extends View {
                 if (strumAt < 0) strumAt = dT[k];
                 if (nowNs < chordUntilNs) chordUntilNs = Math.max(chordUntilNs, nowNs + 1_500_000_000L);   // still ringing
             }
-            if (dStrum[k] != null && !ignore) {
+            if (strum != null && !ignore) {
                 strumAt = dT[k];                     // later plucks than this clear what it shows
-                analyseStrum(dStrum[k], fsNow);
+                analyseStrum(strum, fsNow);
             }
             tracker.update(dT[k], v, v ? dF[k] : Double.NaN, dOn[k] && !ignore);
-            boolean waitingOnly = strumResult == null && nowNs >= chordUntilNs && !strumBusy && nowNs - strumHeardNs < STRUM_WAIT_NS;
-            if (v && (strumResult != null || nowNs < chordUntilNs || waitingOnly) && tracker.lastOnset > strumAt + 0.05) {
-                clearStrum();                        // a single string again: back to tuning it
+            // a single string again: back to tuning it; an analysis under way is left to finish
+            if (v && (strumResult != null || nowNs < chordUntilNs || !strumBusy && strumPending(nowNs))
+                    && tracker.lastOnset > strumAt + 0.05) {
+                clearStrum();
             }
         }
         if (guide) guideWatch();
-        boolean strumChanged = strumState() != strumSig;
+        boolean strumChanged = strumState(nowNs) != strumSig;
         boolean nowSilent = !paused && sil >= SILENT_SEC;
         boolean changed = nowSilent != silent || trackerSig() != sig || Math.abs(tracker.cents - cents0) > 0.01 || strumChanged;
+        boolean silenceStarts = nowSilent && !silent;
         silent = nowSilent;
+        if (silenceStarts && mic == MIC_OK) announce(micMessage());
         int ev = tracker.takeEvents();
         if ((ev & Tracker.EV_IN_TUNE) != 0 && !ignore) {
-            ui.pulseT = 0f;
+            if (!tabsCovered()) ui.pulseT = 0f;     // a pulse played after settings closes would mark nothing
             buzz(true);
             if (guide && !gComplete && tracker.string == gStep) {
                 if (settings.guideAuto) {
@@ -347,7 +409,8 @@ final class TunerView extends View {
             }
             changed = true;
         }
-        if (changed && running) invalidate();
+        // under settings the tabs are not drawn: they catch up when it slides away
+        if (changed && running && !tabsCovered()) invalidate();
     }
 
     private int trackerSig() {
@@ -366,10 +429,19 @@ final class TunerView extends View {
     // selected tuning (each string's deviation), open strings of another tuning (offered as a
     // switch), or a chord (pluck one string at a time).
 
-    private int strumState() {
-        long now = System.nanoTime();
+    private int strumState(long now) {
         return (strumResult != null ? 1 : 0) + (now < chordUntilNs ? 2 : 0)
-                + (strumBusy || now - strumHeardNs < STRUM_WAIT_NS ? 4 : 0) + 8 * strumToken;
+                + (strumPending(now) ? 4 : 0) + 8 * strumToken;
+    }
+
+    /** Several strings were heard: their analysis is under way or their audio still to come. */
+    private boolean strumPending(long now) {
+        return strumBusy || now - strumHeardNs < STRUM_WAIT_NS;
+    }
+
+    /** A strum is on show: its result, "several notes", or "checking every string". */
+    private boolean strumShown(long now) {
+        return strumResult != null || now < chordUntilNs || strumPending(now);
     }
 
     private void analyseStrum(final float[] w, final int fs) {
@@ -516,7 +588,6 @@ final class TunerView extends View {
         }
         if (toneOn) {
             stopTone();
-            invalidate();
             return true;
         }
         if (page == PAGE_TUNER) {
@@ -530,34 +601,24 @@ final class TunerView extends View {
 
     @Override
     public WindowInsets onApplyWindowInsets(WindowInsets in) {
-        int l = in.getSystemWindowInsetLeft(), t = in.getSystemWindowInsetTop();
-        int r = in.getSystemWindowInsetRight(), b = in.getSystemWindowInsetBottom();
+        int l, t, r, b;
         if (Build.VERSION.SDK_INT >= 30) {
-            // system bars + display cutout; the deprecated getters leave the cutout out
-            try {
-                Class<?> type = Class.forName("android.view.WindowInsets$Type");
-                int mask = (Integer) type.getMethod("systemBars").invoke(null)
-                        | (Integer) type.getMethod("displayCutout").invoke(null);
-                Object ins = WindowInsets.class.getMethod("getInsets", int.class).invoke(in, mask);
-                Class<?> ic = ins.getClass();
-                l = ic.getField("left").getInt(ins);
-                t = ic.getField("top").getInt(ins);
-                r = ic.getField("right").getInt(ins);
-                b = ic.getField("bottom").getInt(ins);
-            } catch (Exception ignored) {
-                // keep the legacy values
-            }
-        } else if (Build.VERSION.SDK_INT >= 28) {
-            try {
-                Object cut = WindowInsets.class.getMethod("getDisplayCutout").invoke(in);
-                if (cut != null) {
-                    Class<?> cc = cut.getClass();
-                    l = Math.max(l, (Integer) cc.getMethod("getSafeInsetLeft").invoke(cut));
-                    t = Math.max(t, (Integer) cc.getMethod("getSafeInsetTop").invoke(cut));
-                    r = Math.max(r, (Integer) cc.getMethod("getSafeInsetRight").invoke(cut));
-                    b = Math.max(b, (Integer) cc.getMethod("getSafeInsetBottom").invoke(cut));
-                }
-            } catch (Exception ignored) {
+            Insets s = in.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            l = s.left;
+            t = s.top;
+            r = s.right;
+            b = s.bottom;
+        } else {
+            l = in.getSystemWindowInsetLeft();
+            t = in.getSystemWindowInsetTop();
+            r = in.getSystemWindowInsetRight();
+            b = in.getSystemWindowInsetBottom();
+            DisplayCutout cut = Build.VERSION.SDK_INT >= 28 ? in.getDisplayCutout() : null;
+            if (cut != null) {                   // the system window insets leave the cutout out
+                l = Math.max(l, cut.getSafeInsetLeft());
+                t = Math.max(t, cut.getSafeInsetTop());
+                r = Math.max(r, cut.getSafeInsetRight());
+                b = Math.max(b, cut.getSafeInsetBottom());
             }
         }
         ui.insetL = l;
@@ -607,7 +668,8 @@ final class TunerView extends View {
     }
 
     private boolean step(float dt, long now) {
-        boolean anim = false;
+        boolean anim = false;                    // settings, and the move between pages
+        boolean tabAnim = false;                 // drawn only while a tab shows
 
         if (palT < 1f) {
             palT = Math.min(1f, palT + dt / 0.45f);
@@ -621,10 +683,8 @@ final class TunerView extends View {
         host.setBackIntercept(page != PAGE_GUIDE || toneOn);           // host no-ops if unchanged
         ui.time = (now - t0Ns) * 1e-9f;
 
-        long nowNs0 = System.nanoTime();
         boolean strumView = strumResult != null && strumResult.suggest < 0 && !guideMode();
-        boolean overlay = !guideMode() && (strumResult != null || nowNs0 < chordUntilNs
-                || strumBusy || nowNs0 - strumHeardNs < STRUM_WAIT_NS);
+        boolean overlay = !guideMode() && strumShown(now);
         int worst = strumView ? strumWorst() : -1;
         boolean strumBead = worst >= 0 && Math.abs(strumResult.cents[worst]) > strumOk();
         boolean showing = (overlay ? strumBead : tracker.hasNote) && !toneOn && !paused && mic == MIC_OK && !silent;
@@ -633,31 +693,31 @@ final class TunerView extends View {
         ui.noteT = approach(ui.noteT, nt, dt, 0.12f);
         ui.liveT = approach(ui.liveT, lt, dt, 0.10f);
         ui.tuneT = approach(ui.tuneT, tt, dt, 0.07f);
-        anim |= ui.noteT != nt || ui.liveT != lt || ui.tuneT != tt;
+        tabAnim |= ui.noteT != nt || ui.liveT != lt || ui.tuneT != tt;
 
         float target = strumBead ? Renderer.beadOf(strumResult.cents[worst])
                 : !tracker.hasNote ? 0f
-                : guideMode() ? (float) Math.tanh(tracker.cents / 90.0)    // wider: beginners start far off
+                : guideMode() ? Renderer.guideBeadOf(tracker.cents)
                 : Renderer.beadOf(tracker.cents);
         if (ui.noteT == 0f) {
             ui.bead = target;
             beadV = 0f;
         } else {
-            anim |= spring(target, dt);
+            tabAnim |= spring(target, dt);
         }
         if (ui.pulseT >= 0f) {
             ui.pulseT += dt / 0.7f;
             if (ui.pulseT > 1f) ui.pulseT = -1f;
-            anim = true;
+            tabAnim = true;
         }
 
         float st = tuning().chromatic() ? 0f : 1f;
         ui.stringsT = approach(ui.stringsT, st, dt, 0.09f);
-        anim |= ui.stringsT != st;
+        tabAnim |= ui.stringsT != st;
         int tgt = toneOn ? toneString : strumView ? worst : tracker.hasNote ? tracker.string : -1;
         float sv = strumView ? 1f : 0f;
         ui.strumT = approach(ui.strumT, sv, dt, 0.1f);
-        anim |= ui.strumT != sv;
+        tabAnim |= ui.strumT != sv;
         ui.strumOk = (float) strumOk();
         for (int i = 0; i < ui.stringCount; i++) {
             ui.sStrum[i] = strumView && i < strumResult.count ? (float) strumResult.cents[i] : ui.sStrum[i];
@@ -669,7 +729,7 @@ final class TunerView extends View {
             ui.sTunedT[i] = approach(ui.sTunedT[i], a, dt, 0.08f);
             ui.sTargetT[i] = approach(ui.sTargetT[i], b, dt, 0.08f);
             ui.sLockT[i] = approach(ui.sLockT[i], k, dt, 0.08f);
-            anim |= ui.sTunedT[i] != a || ui.sTargetT[i] != b || ui.sLockT[i] != k;
+            tabAnim |= ui.sTunedT[i] != a || ui.sTargetT[i] != b || ui.sLockT[i] != k;
         }
 
         float h = settings.haptics ? 1f : 0f, ko = settings.keepOn ? 1f : 0f;
@@ -679,10 +739,9 @@ final class TunerView extends View {
 
         ui.toneOn = toneOn;
         ui.paused = paused;
-        updateReadout();
-        long nowNs = System.nanoTime();
-        if (nowNs < chordUntilNs || strumBusy || nowNs - strumHeardNs < STRUM_WAIT_NS) anim = true;
-        if (ui.guideT > 0.001f) anim |= stepGuide(dt);
+        updateReadout(now);
+        if (now < chordUntilNs || strumPending(now)) tabAnim = true;      // shown until a moment passes
+        if (ui.guideT > 0.001f) tabAnim |= stepGuide(dt, now);
 
         // the screen stays on only while it is useful: tuning or a reference tone
         boolean awake = settings.keepOn && page != PAGE_SETTINGS && (toneOn || (!paused && mic == MIC_OK && !silent));
@@ -690,7 +749,13 @@ final class TunerView extends View {
             keepOn = awake;
             setKeepScreenOn(awake);
         }
-        return anim;
+        // under settings the tabs are not drawn: their motion does not keep frames coming
+        return anim || tabAnim && !tabsCovered();
+    }
+
+    /** Settings covers both tabs: nothing they show is visible. */
+    private boolean tabsCovered() {
+        return ui.pageT >= 1f;
     }
 
     /** Damped spring of the bead toward {@code target}, sub-stepped for stability. */
@@ -722,16 +787,16 @@ final class TunerView extends View {
     private static final int ST_MESSAGE = 1, ST_PAUSED = 2, ST_TONE = 3, ST_IDLE = 4, ST_NOTE = 5,
             ST_STRUM = 6, ST_CHORD = 7, ST_STRUMMING = 8;
 
-    private void updateReadout() {
+    private void updateReadout(long now) {
         int state;
-        // state = class * 16 + detail
+        // state = class * 16 + detail; the tone comes before the pause: it also plays while paused
         if (mic != MIC_OK) state = ST_MESSAGE * 16 + mic;
+        else if (toneOn) state = ST_TONE * 16;
         else if (paused) state = ST_PAUSED * 16;
         else if (silent) state = ST_MESSAGE * 16 + 7;
-        else if (toneOn) state = ST_TONE * 16;
         else if (strumResult != null) state = ST_STRUM * 16 + (strumToken & 15);
-        else if (System.nanoTime() < chordUntilNs) state = ST_CHORD * 16;
-        else if (strumBusy || System.nanoTime() - strumHeardNs < STRUM_WAIT_NS) state = ST_STRUMMING * 16;
+        else if (now < chordUntilNs) state = ST_CHORD * 16;
+        else if (strumPending(now)) state = ST_STRUMMING * 16;
         else if (!tracker.hasNote) state = ST_IDLE * 16;
         else state = ST_NOTE * 16 + (tracker.live ? 1 : 0) + (tracker.inTune ? 2 : 0) + (tracker.locked >= 0 ? 4 : 0);
         int other = state / 16 == ST_NOTE ? otherString() : -1;
@@ -899,6 +964,9 @@ final class TunerView extends View {
         description = s;
     }
 
+    // announceForAccessibility is deprecated from 36 in favour of live regions and pane titles. What
+    // is said here are moments (reaching pitch, a tab or mode switched, a refusal), not text left on
+    // screen to re-read; the readings themselves are the throttled live region.
     private void announce(String s) {
         if (am != null && am.isEnabled()) announceForAccessibility(s);
     }
@@ -933,7 +1001,7 @@ final class TunerView extends View {
                 if (!swiping && !scrolling && !repeated && page != PAGE_SETTINGS && Math.abs(dx) > slop * 2f && Math.abs(dx) > Math.abs(dy) * 1.5f) {
                     swiping = true;
                 }
-                if (!swiping && !scrolling && !repeated && page == 1 && ui.settingsMaxScroll > 0f
+                if (!swiping && !scrolling && !repeated && page == PAGE_SETTINGS && ui.settingsMaxScroll > 0f
                         && Math.abs(dy) > slop && Math.abs(dy) > Math.abs(dx)) {
                     scrolling = true;
                 }
@@ -1002,6 +1070,7 @@ final class TunerView extends View {
     private void enterGuide(boolean snap) {
         if (tuning().chromatic()) setTuning(Tuning.indexOf("Standard"));   // Easy works string by string
         if (toneOn) stopTone();
+        clearStrum();                                       // a strum heard on Advanced would hold "One string" here
         page = basePage = PAGE_GUIDE;
         int n = tuning().count(), first = -1;
         for (int i = 0; i < n && first < 0; i++) if ((tracker.tunedMask & (1 << i)) == 0) first = i;
@@ -1011,8 +1080,6 @@ final class TunerView extends View {
         ui.gCursor = gStep;
         ui.gDoneT = gComplete ? 1.2f : 0f;
         if (snap) ui.guideT = 1f;
-        settings.guideSeen = true;
-        gStatus = -1;
         if (!snap) announce("Easy tuner");
         invalidate();
     }
@@ -1035,7 +1102,7 @@ final class TunerView extends View {
     private void guideReset(double muteHz) {
         main.removeCallbacks(advancer);
         gAdvancing = false;
-        gStatus = -1;
+        guide.reset();
         applyTrackerMode();
         tracker.reset(false);
         gMuteHz = muteHz;
@@ -1143,176 +1210,24 @@ final class TunerView extends View {
         double keep = tracker.lastOnset;
         guideJump(best);
         gFollowedOnset = keep;
-        announce("Switched to the " + position(best));
+        announce("Switched to the " + Guide.position(t, best));
         return true;
     }
 
-    private static final int G_WAIT = 0, G_STALE = 1, G_TIGHTEN = 2, G_LOOSEN = 3, G_ALMOST = 4, G_TUNED = 5,
-            G_WRONG_STRING = 6, G_WRONG_WAY = 7, G_DONE = 8, G_STRUM = 9, G_UNHEARD = 10, G_PAUSED = 11, G_TONE = 12,
-            G_TOO_HIGH = 13;
-
-    private static final String[] ORDINAL = {"", "", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh", "Eighth"};
-
-    /** "top string", "third string from the top", "bottom string". */
-    private String position(int i) {
-        int n = tuning().count();
-        if (i == 0) return "top string";
-        if (i == n - 1) return "bottom string";
-        return ORDINAL[i + 1].toLowerCase(Locale.US) + " string from the top";
-    }
-
-    /** "top string", "3rd from the top", "bottom string": for advice lines. */
-    private String shortPos(int i) {
-        int n = tuning().count();
-        if (i == 0) return "top string";
-        if (i == n - 1) return "bottom string";
-        String[] o = {"", "", "2nd", "3rd", "4th", "5th", "6th", "7th", "8th"};
-        return o[i + 1] + " from the top";
-    }
-
     private String guideTitle() {
-        if (gComplete) {
-            int n = tuning().count(), done = Integer.bitCount(tracker.tunedMask & ((1 << n) - 1));
-            return done == n ? "All strings tuned" : done + " of " + n + " strings tuned";
-        }
-        int n = tuning().count();
-        if (gStep == 0) return "Top string";
-        if (gStep == n - 1) return "Bottom string";
-        return ORDINAL[gStep + 1] + " from the top";
-    }
-
-    private String noteName(int midi) {
-        boolean flats = tuning().flats(settings.flats);
-        int acc = Tuning.accidental(midi, flats);
-        return Tuning.letter(midi, flats) + (acc == 1 ? " sharp" : acc == 2 ? " flat" : "");
-    }
-
-    private String guideSub() {
-        Tuning t = tuning();
-        int n = t.count();
-        if (gComplete) {
-            return Integer.bitCount(tracker.tunedMask & ((1 << n) - 1)) == n
-                    ? "Tuning one string pulls on the others a little. Go round once more to check."
-                    : "Tap a string to go back to it.";
-        }
-        boolean mono = true;
-        for (int i = 1; i < n; i++) mono &= t.strings[i] > t.strings[i - 1];
-        String where;
-        if (gStep == 0) where = mono ? "The thickest one, nearest your face. " : "The one nearest your face. ";
-        else if (gStep == n - 1) where = mono ? "The thinnest one, nearest the floor. " : "The one nearest the floor. ";
-        else where = "Pluck it and let it ring. ";
-        return where + "Its note is " + noteName(t.strings[gStep]) + ".";
+        return Guide.title(tuning(), gStep, gComplete, tracker.tunedMask);
     }
 
     /** Status of the current step; returns true when the words changed. */
-    private boolean guideStatus() {
-        Tuning t = tuning();
-        int st, arg = 0;
-        double c = tracker.cents, tol = tracker.tolerance;
-        long nowNs = System.nanoTime();
-        boolean strummed = strumResult != null || nowNs < chordUntilNs || strumBusy || nowNs - strumHeardNs < STRUM_WAIT_NS;
-        if (gComplete) st = G_DONE;
-        else if (paused) st = G_PAUSED;
-        else if (toneOn) st = G_TONE;
-        else if (gAdvancing) st = G_TUNED;
-        else if (strummed) st = G_STRUM;
-        else if (!tracker.hasNote) st = nowNs - gLastHeardNs > 6_000_000_000L && mic == MIC_OK && !silent ? G_UNHEARD : G_WAIT;
-        else {
-            int other = -1;
-            if (Math.abs(c) > 250.0) {
-                for (int j = 0; j < t.count(); j++) {
-                    if (j != gStep && Math.abs(Tuning.cents(tracker.hz, Tuning.freq(t.strings[j], settings.a4))) < 35.0) other = j;
-                }
-            }
-            if (other >= 0) {
-                st = G_WRONG_STRING;                                     // manual mode: point it out
-                arg = other;
-            } else if (c > 900.0) {
-                // A string cannot be tightened most of an octave: it would have broken. This is a
-                // misreading (a harmonic, an octave error), not a reason to say "loosen it now".
-                st = G_TOO_HIGH;
-            } else if (gWrongWay && tracker.live) st = G_WRONG_WAY;
-            else if (Math.abs(c) <= tol || !tracker.live && (tracker.tunedMask & (1 << gStep)) != 0) {
-                boolean marked = (tracker.tunedMask & (1 << gStep)) != 0;
-                st = tracker.inTune || !tracker.live && marked ? G_TUNED : G_ALMOST;
-                if (st == G_ALMOST && !tracker.live) arg = 10;                // stale: pluck again
-            }
-            else {
-                st = c < 0 ? G_TIGHTEN : G_LOOSEN;
-                double a = Math.abs(c);
-                arg = a > (c < 0 ? 100.0 : 200.0) ? 2 : a > 15.0 ? 1 : 0;   // far, off, near
-                if (c > 0 && a > 100.0 && a <= 200.0) arg = 3;               // high: go below first
-                if (!tracker.live) arg += 10;                                // stale: pluck again
-            }
+    private boolean guideStatus(long now) {
+        boolean unheard = now - gLastHeardNs > 6_000_000_000L && mic == MIC_OK && !silent;
+        if (!guide.update(tracker, gStep, gComplete, toneOn, paused, gAdvancing, strumShown(now), unheard, gWrongWay)) {
+            return false;
         }
-        if (st == gStatus && arg == gStatusArg) return false;
-        gStatus = st;
-        gStatusArg = arg;
-        String word, detail;
-        boolean accent = false;
-        boolean stale = arg >= 10;
-        int lvl = arg % 10;
-        switch (st) {
-            case G_DONE: word = ""; detail = ""; break;
-            case G_TUNED:
-                word = "Tuned";
-                accent = true;
-                detail = settings.guideAuto ? "" : "Tap Next for the next string.";
-                break;
-            case G_WAIT:
-                word = "";
-                detail = "Listening";
-                break;
-            case G_PAUSED:
-                word = "";
-                detail = "Paused. Tap the pause button to listen again.";
-                break;
-            case G_TONE:
-                word = "Listen";
-                detail = "How the " + position(gStep) + " should sound. Tap the fork to stop.";
-                break;
-            case G_UNHEARD:
-                gUnheardShown = true;
-                word = "";
-                detail = "Not hearing it yet. Hold the phone close and pluck firmly.";
-                break;
-            case G_STRUM:
-                word = "One string";
-                // a string far too slack (new, unwound) sounds below anything a string should: it
-                // reads as several notes too
-                detail = "Pluck only the " + position(gStep) + ". If it is floppy, tighten it first.";
-                break;
-            case G_WRONG_STRING:
-                word = "Wrong string?";
-                detail = "That is the " + shortPos(arg) + ". Pluck the " + shortPos(gStep) + ", or tap that one.";
-                break;
-            case G_TOO_HIGH:
-                word = "Pluck again";
-                detail = "Far too high for this string. Pluck it again, mid-string.";
-                break;
-            case G_WRONG_WAY:
-                word = "Other way";
-                detail = "The note is moving away. Turn the peg the other way.";
-                break;
-            case G_ALMOST:
-                word = "Almost";
-                detail = stale ? "Pluck again to check it." : "Right there. Let it ring.";
-                break;
-            case G_TIGHTEN:
-                word = "Tighten";
-                detail = stale ? "Pluck again while you turn the peg."
-                        : lvl == 2 ? "Much too low. Turn the peg slowly as you pluck."
-                        : lvl == 1 ? "Too low. Keep turning slowly." : "Nearly there. Just a touch more.";
-                break;
-            default:
-                word = "Loosen";
-                detail = stale ? "Pluck again while you turn the peg."
-                        : lvl == 2 ? "Far too high. Loosen it now, or it could break."
-                        : lvl == 3 ? "Much too high. Go below the note, then tighten up to it."
-                        : lvl == 1 ? "Too high. Go a little below, then tighten up to it." : "Nearly there. Just a touch looser.";
-                break;
-        }
-        if (st == G_WRONG_WAY && ui.gShakeT < 0f) ui.gShakeT = 0f;
+        int st = guide.status;
+        if (st == Guide.UNHEARD) gUnheardShown = true;
+        if (st == Guide.WRONG_WAY && ui.gShakeT < 0f) ui.gShakeT = 0f;
+        String word = Guide.word(st), detail = Guide.detail(st, guide.arg, tuning(), gStep, settings.guideAuto);
         if (!word.equals(ui.gWord) || !detail.equals(ui.gDetail)) {
             ui.gWordPrev = ui.gWord;
             ui.gDetailPrev = ui.gDetail;
@@ -1320,45 +1235,50 @@ final class TunerView extends View {
             ui.gDetail = detail;
             ui.gWordT = 0f;
         }
-        ui.gWordAccent = accent;
+        ui.gWordAccent = st == Guide.TUNED;
         return true;
     }
 
     /** Words and motion of the guided page. Returns true while anything moves (always, when shown). */
-    private boolean stepGuide(float dt) {
+    private boolean stepGuide(float dt, long now) {
         Tuning t = tuning();
         if (t.chromatic() || gStep >= t.count()) {
             // Easy still fading out while Advanced selects a tuning it cannot show (Chromatic, or
             // fewer strings than the step): keep the last words, finish the fade.
             return running && ui.guideT > 0.001f;
         }
-        int n = Math.min(t.count(), Ui.MAX_STRINGS);
         ui.guideDone = gComplete;
         ui.gStep = gStep;
         ui.gAuto = settings.guideAuto;
-        int lo = Integer.MAX_VALUE, hi = Integer.MIN_VALUE;
-        for (int i = 0; i < n; i++) {
-            lo = Math.min(lo, t.strings[i]);
-            hi = Math.max(hi, t.strings[i]);
-        }
-        for (int i = 0; i < n; i++) ui.gThick[i] = hi > lo ? (hi - t.strings[i]) / (float) (hi - lo) : 0.5f;
-
-        String title = guideTitle(), sub = guideSub();
+        boolean flats = t.flats(settings.flats);
+        // everything the title, sub-line and caption say: rebuilt when it changes, not every frame
+        int key = (((tuningIdx * Ui.MAX_STRINGS + gStep) * 2 + (gComplete ? 1 : 0)) * 2 + (flats ? 1 : 0)) * 16
+                + Integer.bitCount(tracker.tunedMask);
         boolean words = false;
-        if (!title.equals(ui.gTitle) || !sub.equals(ui.gSub)) {
-            ui.gTitlePrev = ui.gTitle;
-            ui.gSubPrev = ui.gSub;
-            ui.gTitle = title;
-            ui.gSub = sub;
-            ui.gTitleT = ui.gTitlePrev.length() == 0 ? 1f : 0f;
-            words = true;
+        if (key != gWordsKey) {
+            gWordsKey = key;
+            int n = Math.min(t.count(), Ui.MAX_STRINGS);
+            int lo = Integer.MAX_VALUE, hi = Integer.MIN_VALUE;
+            for (int i = 0; i < n; i++) {
+                lo = Math.min(lo, t.strings[i]);
+                hi = Math.max(hi, t.strings[i]);
+            }
+            for (int i = 0; i < n; i++) ui.gThick[i] = hi > lo ? (hi - t.strings[i]) / (float) (hi - lo) : 0.5f;
+            String title = guideTitle(), sub = Guide.sub(t, gStep, gComplete, tracker.tunedMask, flats);
+            if (!title.equals(ui.gTitle) || !sub.equals(ui.gSub)) {
+                ui.gTitlePrev = ui.gTitle;
+                ui.gSubPrev = ui.gSub;
+                ui.gTitle = title;
+                ui.gSub = sub;
+                ui.gTitleT = ui.gTitlePrev.length() == 0 ? 1f : 0f;
+                words = true;
+            }
+            ui.gCaption = Guide.caption(t, gStep, gComplete);
         }
-        String caption = gComplete ? t.name + " tuning" : "Step " + (gStep + 1) + " of " + n + " · " + t.name;
-        if (!caption.equals(ui.gCaption)) ui.gCaption = caption;
-        words |= guideStatus();
+        words |= guideStatus(now);
         if (words) {
-            gDescription = gComplete ? title + ". " + sub
-                    : (title + ". " + (ui.gWord.length() > 0 ? ui.gWord + ". " : "") + ui.gDetail).trim();
+            gDescription = gComplete ? ui.gTitle + ". " + ui.gSub
+                    : (ui.gTitle + ". " + (ui.gWord.length() > 0 ? ui.gWord + ". " : "") + ui.gDetail).trim();
         }
 
         ui.gTitleT = Math.min(1f, ui.gTitleT + dt / 0.35f);
@@ -1379,7 +1299,8 @@ final class TunerView extends View {
         ui.gVib = approach(ui.gVib, live ? 1f : 0f, dt, live ? 0.05f : 0.4f);
         float sag = tracker.hasNote && !gComplete ? (float) Math.max(0.0, Math.min(1.0, -tracker.cents / 150.0)) : 0f;
         ui.gSag = approach(ui.gSag, sag, dt, 0.15f);
-        boolean direction = gStatus == G_TIGHTEN || gStatus == G_LOOSEN || gStatus == G_WRONG_WAY || gStatus == G_ALMOST;
+        int gs = guide.status;
+        boolean direction = gs == Guide.TIGHTEN || gs == Guide.LOOSEN || gs == Guide.WRONG_WAY || gs == Guide.ALMOST;
         float chev = live && !gAdvancing && direction && Math.abs(tracker.cents) > tracker.tolerance ? 1f : 0f;
         ui.gChevT = approach(ui.gChevT, chev, dt, 0.12f);
         if (ui.gShakeT >= 0f) {
@@ -1390,7 +1311,7 @@ final class TunerView extends View {
         boolean moving = ui.gPluckT >= 0f || ui.gVib > 0f || ui.gChevT > 0f || ui.gShakeT >= 0f
                 || ui.gTitleT < 1f || ui.gWordT < 1f || ui.gCursor != gStep || ui.gSag != sag
                 || gComplete && ui.gDoneT < 1.2f
-                || waiting && !gUnheardShown && System.nanoTime() - gLastHeardNs < 6_500_000_000L;   // for "not hearing it"
+                || waiting && !gUnheardShown && now - gLastHeardNs < 6_500_000_000L;   // for "not hearing it"
         return running && moving;
     }
 
@@ -1459,17 +1380,18 @@ final class TunerView extends View {
         }
     }
 
-    private boolean focusable(Ui.Hit h) {
-        return h.id != Renderer.H_DIAL && (h.id != Renderer.H_GUIDE || guideMeterActs());
-    }
-
     /**
-     * The guide's meter is a button when a tap has something to do: with Auto off and the
-     * string tuned, Next; in windows too short for the Skip / Auto row, that row's Next / Skip.
+     * The node does something when activated. The dial and a message without a button only read.
+     * The guide's meter is a button when a tap has something to do: with Auto off and the string
+     * tuned, Next; in windows too short for the Skip / Auto row, that row's Next / Skip.
      */
-    private boolean guideMeterActs() {
-        if (!guideMode() || gComplete) return false;
-        return !ui.gPills || !settings.guideAuto && (tracker.tunedMask & (1 << gStep)) != 0;
+    private boolean acts(int id) {
+        if (id == Renderer.H_DIAL) return false;
+        if (id == Renderer.H_MIC) return ui.messageAction.length() > 0;
+        if (id == Renderer.H_GUIDE) {
+            return guideMode() && !gComplete && (!ui.gPills || !settings.guideAuto && (tracker.tunedMask & (1 << gStep)) != 0);
+        }
+        return true;
     }
 
     /** Reading order: rows top to bottom, then left to right. */
@@ -1483,7 +1405,7 @@ final class TunerView extends View {
         float bo = Float.MAX_VALUE;
         for (int i = 0; i < ui.hitCount; i++) {
             Ui.Hit h = ui.hits[i];
-            if (!focusable(h)) continue;
+            if (!acts(h.id)) continue;
             float o = order(h);
             if (o < bo) {
                 bo = o;
@@ -1498,7 +1420,7 @@ final class TunerView extends View {
         float bd = Float.MAX_VALUE;
         for (int i = 0; i < ui.hitCount; i++) {
             Ui.Hit h = ui.hits[i];
-            if (!focusable(h)) continue;
+            if (!acts(h.id)) continue;
             float dx = h.rect.centerX() - x, dy = h.rect.centerY() - y;
             float d = dx * dx + dy * dy;
             if (d < bd) {
@@ -1519,7 +1441,7 @@ final class TunerView extends View {
             float bo = dir > 0 ? Float.MAX_VALUE : -Float.MAX_VALUE;
             for (int i = 0; i < ui.hitCount; i++) {
                 Ui.Hit h = ui.hits[i];
-                if (!focusable(h) || h == cur) continue;
+                if (!acts(h.id) || h == cur) continue;
                 float o = order(h);
                 if (dir > 0 ? (o > co && o < bo) : (o < co && o > bo)) {
                     bo = o;
@@ -1545,7 +1467,7 @@ final class TunerView extends View {
         float bs = Float.MAX_VALUE;
         for (int i = 0; i < ui.hitCount; i++) {
             Ui.Hit h = ui.hits[i];
-            if (!focusable(h) || h == cur) continue;
+            if (!acts(h.id) || h == cur) continue;
             float hx = h.rect.centerX() - x, hy = h.rect.centerY() - y;
             float along = hx * dx + hy * dy, across = Math.abs(hx * dy - hy * dx);
             if (along < 4f * ui.dp) continue;
@@ -1555,7 +1477,7 @@ final class TunerView extends View {
                 best = h.id;
             }
         }
-        if (best == 0 && dy != 0 && page == 1 && ui.settingsMaxScroll > 0f) {
+        if (best == 0 && dy != 0 && page == PAGE_SETTINGS && ui.settingsMaxScroll > 0f) {
             // the next row is scrolled out of view: bring it in
             float to = clamp(ui.settingsScroll + dy * 96f * ui.dp, 0f, ui.settingsMaxScroll);
             if (to != ui.settingsScroll) {
@@ -1590,6 +1512,7 @@ final class TunerView extends View {
     }
 
     private void action(int id) {
+        if (!acts(id)) return;                            // a tap on text: no buzz either
         boolean changed = false;
         if (id >= Renderer.H_GSTRING && id < Renderer.H_GSTRING + Ui.MAX_STRINGS) {
             int i = id - Renderer.H_GSTRING;
@@ -1649,9 +1572,7 @@ final class TunerView extends View {
                 else enterGuide(false);
                 break;
             case Renderer.H_GUIDE_SKIP: guideNext(false); break;
-            case Renderer.H_GUIDE:
-                if (guideMeterActs()) guideNext((tracker.tunedMask & (1 << gStep)) != 0);
-                break;
+            case Renderer.H_GUIDE: guideNext((tracker.tunedMask & (1 << gStep)) != 0); break;
             case Renderer.H_GUIDE_AUTO:
                 settings.guideAuto = !settings.guideAuto;
                 if (!settings.guideAuto && gAdvancing) {
@@ -1663,7 +1584,7 @@ final class TunerView extends View {
                     main.removeCallbacks(advancer);
                     main.postDelayed(advancer, ADVANCE_MS);
                 }
-                gStatus = -1;                                // the words depend on the mode
+                guide.reset();                               // the words depend on the mode
                 announce(settings.guideAuto ? "Strings switch automatically" : "Strings switch when you tap Next");
                 changed = true;
                 break;
@@ -1671,7 +1592,6 @@ final class TunerView extends View {
                 tracker.tunedMask = 0;
                 guideJump(0);
                 break;
-            case Renderer.H_GUIDE_DONE: exitGuide(); break;
             // Advanced only: a tap landing in the moment Easy fades in must not change the tuning
             case Renderer.H_TUNING_PREV: if (!guideMode()) setTuning(tuningIdx - 1); changed = true; break;
             case Renderer.H_TUNING_NEXT: if (!guideMode()) setTuning(tuningIdx + 1); changed = true; break;
@@ -1729,7 +1649,8 @@ final class TunerView extends View {
         invalidate();
     }
 
-    private void stopTone() {
+    /** Stops the reference tone if it plays; readings resume after its ring-out. */
+    void stopTone() {
         if (!toneOn) return;
         toneOn = false;
         toneString = -1;
@@ -1737,6 +1658,7 @@ final class TunerView extends View {
         ignoreUntilNs = System.nanoTime() + TONE_TAIL_NS;
         tracker.reset(false);
         gLastHeardNs = System.nanoTime();             // nothing was listened to while it played
+        invalidate();
     }
 
     private void setTheme(int idx) {
@@ -1770,8 +1692,6 @@ final class TunerView extends View {
         tracker.locked = -1;
         tracker.reset(true);
         clearStrum();
-        strumToken++;                                  // an analysis under way is for the old tuning
-        strumBusy = false;
         if (gStep >= t.count()) gStep = 0;
         if (!snap) host.setPitchFloor(pitchFloor());
         ui.tuningName = t.name;
@@ -1822,7 +1742,7 @@ final class TunerView extends View {
     private void buzz(boolean strong) {
         if (!settings.haptics) return;
         int c;
-        if (strong) c = Build.VERSION.SDK_INT >= 30 ? 16 /* CONFIRM */ : HapticFeedbackConstants.VIRTUAL_KEY;
+        if (strong) c = Build.VERSION.SDK_INT >= 30 ? HapticFeedbackConstants.CONFIRM : HapticFeedbackConstants.VIRTUAL_KEY;
         else c = HapticFeedbackConstants.KEYBOARD_TAP;
         performHapticFeedback(c);
     }
@@ -1847,11 +1767,11 @@ final class TunerView extends View {
         a11y.prune();
         int sig = 17;
         for (int i = 0; i < ui.hitCount; i++) sig = sig * 31 + ui.hits[i].id;
-        if (page == 1) sig = sig * 31 + Math.round(ui.settingsScroll / ui.dp);
+        if (page == PAGE_SETTINGS) sig = sig * 31 + Math.round(ui.settingsScroll / ui.dp);
         ViewParent parent = getParent();
         if (sig != hitSig && parent != null) {
             hitSig = sig;
-            AccessibilityEvent ev = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
+            AccessibilityEvent ev = event(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
             onInitializeAccessibilityEvent(ev);
             ev.setContentChangeTypes(AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE);
             parent.requestSendAccessibilityEvent(this, ev);
@@ -1875,7 +1795,7 @@ final class TunerView extends View {
             int i = id - Renderer.H_GSTRING;
             Tuning t = tuning();
             if (i >= t.count()) return "";
-            String s = position(i) + ", " + noteName(t.strings[i]);
+            String s = Guide.position(t, i) + ", " + Guide.noteName(t.strings[i], t.flats(settings.flats));
             s = Character.toUpperCase(s.charAt(0)) + s.substring(1);
             if ((tracker.tunedMask & (1 << i)) != 0) s += ", tuned";
             return s + (i == gStep && !gComplete ? ", current" : ". Tune this string");
@@ -1896,15 +1816,14 @@ final class TunerView extends View {
             case Renderer.H_TONE: return "Reference tone";       // state is the switch's checked flag
             case Renderer.H_PAUSE: return "Listening";
             case Renderer.H_DIAL: return description;
-            case Renderer.H_GUIDE: return guideMeterActs() ? gDescription + " Double-tap for the next string." : gDescription;
+            case Renderer.H_GUIDE: return gDescription;
             case Renderer.H_GUIDE_OPEN: return "Advanced tuner";
             case Renderer.H_SUGGEST: return ui.readPill;
             case Renderer.H_GUIDE_SKIP: return settings.guideAuto ? "Skip this string" : "Next string";
             case Renderer.H_GUIDE_AUTO: return "Switch strings automatically";
             case Renderer.H_GUIDE_AGAIN: return "Check again";
-            case Renderer.H_GUIDE_DONE: return "Done";
             case Renderer.H_BACK: return "Back";
-            case Renderer.H_MIC: return ui.messageAction;
+            case Renderer.H_MIC: return ui.messageAction.length() > 0 ? ui.message + ". " + ui.messageAction : ui.message;
             case Renderer.H_TUNING_PREV: return "Tuning " + ui.tuningName + ". Previous";
             case Renderer.H_TUNING_NEXT: return "Tuning " + ui.tuningName + ". Next";
             case Renderer.H_A4_PREV: return "Reference pitch A4 " + settings.a4 + " hertz. Lower";
@@ -1938,6 +1857,16 @@ final class TunerView extends View {
         }
     }
 
+    private String className(int id) {
+        if (isToggle(id)) return "android.widget.Switch";
+        return id == Renderer.H_GUIDE || !acts(id) ? "android.widget.TextView" : "android.widget.Button";
+    }
+
+    /** Events are no longer pooled from 33, where obtain() is deprecated; the constructor exists from 30. */
+    private static AccessibilityEvent event(int type) {
+        return Build.VERSION.SDK_INT >= 30 ? new AccessibilityEvent(type) : AccessibilityEvent.obtain(type);
+    }
+
     private final class A11y extends AccessibilityNodeProvider {
         private static final int NONE = Integer.MIN_VALUE;
         private int focused = NONE, hovered = NONE;
@@ -1947,7 +1876,8 @@ final class TunerView extends View {
         @Override
         public AccessibilityNodeInfo createAccessibilityNodeInfo(int id) {
             if (id == HOST_VIEW_ID) {
-                AccessibilityNodeInfo info = AccessibilityNodeInfo.obtain(TunerView.this);
+                AccessibilityNodeInfo info = Build.VERSION.SDK_INT >= 30 ? new AccessibilityNodeInfo(TunerView.this)
+                        : AccessibilityNodeInfo.obtain(TunerView.this);     // pooled before 30, deprecated from 33
                 onInitializeAccessibilityNodeInfo(info);
                 for (int i = 0; i < ui.hitCount; i++) info.addChild(TunerView.this, ui.hits[i].id);
                 if (scrollable()) {
@@ -1964,34 +1894,35 @@ final class TunerView extends View {
             }
             Ui.Hit h = ui.find(id);
             if (h == null) return null;
-            AccessibilityNodeInfo info = AccessibilityNodeInfo.obtain(TunerView.this, id);
+            AccessibilityNodeInfo info = Build.VERSION.SDK_INT >= 30 ? new AccessibilityNodeInfo(TunerView.this, id)
+                    : AccessibilityNodeInfo.obtain(TunerView.this, id);
             info.setPackageName(getContext().getPackageName());
-            boolean dial = id == Renderer.H_DIAL || id == Renderer.H_GUIDE;
-            boolean toggle = isToggle(id);
-            info.setClassName(dial ? "android.widget.TextView" : toggle ? "android.widget.Switch" : "android.widget.Button");
-            if (id == Renderer.H_GUIDE && guideMeterActs()) {
-                info.setClickable(true);
-                info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK);
-            }
+            info.setClassName(className(id));
             info.setContentDescription(label(id));
-            if (toggle) {
+            if (isToggle(id)) {
                 info.setCheckable(true);
-                info.setChecked(checked(id));
+                if (Build.VERSION.SDK_INT >= 36) {
+                    info.setChecked(checked(id) ? AccessibilityNodeInfo.CHECKED_STATE_TRUE : AccessibilityNodeInfo.CHECKED_STATE_FALSE);
+                } else {
+                    info.setChecked(checked(id));
+                }
             }
             info.setParent(TunerView.this);
             r.set(Math.round(h.rect.left), Math.round(h.rect.top), Math.round(h.rect.right), Math.round(h.rect.bottom));
-            info.setBoundsInParent(r);
+            if (Build.VERSION.SDK_INT < 29) info.setBoundsInParent(r);   // services read only screen bounds from 29
             getLocationOnScreen(loc);
             r.offset(loc[0], loc[1]);
             info.setBoundsInScreen(r);
             info.setVisibleToUser(true);
             info.setEnabled(true);
             info.setFocusable(true);
-            if (dial) {
-                info.setLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-            } else {
+            if (id == Renderer.H_DIAL || id == Renderer.H_GUIDE) info.setLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+            if (acts(id)) {
                 info.setClickable(true);
-                info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK);
+                // the meter's text is the advice; what a tap does is said as the action's label
+                info.addAction(id != Renderer.H_GUIDE ? AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK
+                        : new AccessibilityNodeInfo.AccessibilityAction(AccessibilityNodeInfo.ACTION_CLICK,
+                                settings.guideAuto && (tracker.tunedMask & (1 << gStep)) == 0 ? "Skip this string" : "Next string"));
             }
             if (focused == id) {
                 info.setAccessibilityFocused(true);
@@ -2036,7 +1967,7 @@ final class TunerView extends View {
                     }
                     return true;
                 case AccessibilityNodeInfo.ACTION_CLICK:
-                    if (id == Renderer.H_DIAL || id == Renderer.H_GUIDE && !guideMeterActs()) return false;
+                    if (!acts(id)) return false;
                     action(id);
                     send(id, AccessibilityEvent.TYPE_VIEW_CLICKED);
                     return true;
@@ -2046,7 +1977,7 @@ final class TunerView extends View {
         }
 
         private boolean scrollable() {
-            return page == 1 && ui.settingsMaxScroll > 0f;
+            return page == PAGE_SETTINGS && ui.settingsMaxScroll > 0f;
         }
 
         void prune() {
@@ -2086,11 +2017,10 @@ final class TunerView extends View {
             if (am == null || !am.isEnabled()) return;
             ViewParent parent = getParent();
             if (parent == null) return;
-            AccessibilityEvent ev = AccessibilityEvent.obtain(type);
+            AccessibilityEvent ev = event(type);
             ev.setPackageName(getContext().getPackageName());
             boolean toggle = isToggle(id);
-            ev.setClassName(id == Renderer.H_DIAL || id == Renderer.H_GUIDE ? "android.widget.TextView"
-                    : toggle ? "android.widget.Switch" : "android.widget.Button");
+            ev.setClassName(className(id));
             ev.setSource(TunerView.this, id);
             ev.setEnabled(true);
             ev.setContentDescription(label(id));

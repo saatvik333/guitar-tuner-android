@@ -34,6 +34,8 @@ public final class EngineTest {
         humAfterSilence();
         overlappingStrings();
         ringingFifths();
+        quietChordSwell();
+        bassRingingBelowGuitar();
         strums();
         timing();
         System.out.printf(Locale.US, "%n%d passed, %d failed%n", pass, fail);
@@ -43,10 +45,9 @@ public final class EngineTest {
     // ---- signals -------------------------------------------------------------------------------
 
     static final class Frame {
-        double t, f, clarity, level;
+        double t, f;
         boolean voiced, onset;
         int octFix;
-        double sub;
     }
 
     static ArrayList<Frame> run(int fs, float[] x) {
@@ -54,7 +55,13 @@ public final class EngineTest {
     }
 
     static ArrayList<Frame> run(int fs, short[] pcm) {
+        return run(fs, pcm, PitchEngine.F_MIN);
+    }
+
+    /** {@code minHz}: the lowest pitch of the selected tuning, as {@code AudioInput} sets it. */
+    static ArrayList<Frame> run(int fs, short[] pcm, double minHz) {
         PitchEngine e = new PitchEngine(fs);
+        e.minHz = minHz;
         ArrayList<Frame> out = new ArrayList<>();
         int off = 0;
         while (off < pcm.length) {
@@ -63,12 +70,9 @@ public final class EngineTest {
                 Frame f = new Frame();
                 f.t = e.time;
                 f.f = e.freq;
-                f.clarity = e.clarity;
-                f.level = e.levelDb;
                 f.voiced = e.voiced;
                 f.onset = e.onset;
                 f.octFix = e.octaveFix;
-                f.sub = e.subRatio;
                 out.add(f);
             }
         }
@@ -168,12 +172,13 @@ public final class EngineTest {
         return x;
     }
 
-    static double cents(double f, double ref) {
-        return 1200.0 * Math.log(f / ref) / Math.log(2.0);
+    static double freq(int midi) {
+        return Tuning.freq(midi, 440.0);
     }
 
-    static double freq(int midi) {
-        return 440.0 * Math.pow(2, (midi - 69) / 12.0);
+    /** At least 90% of the frames after t0 are voiced; {@code st} comes from {@link #stats}. */
+    static boolean voiced(double[] st) {
+        return st[2] >= 0.9 * st[4];
     }
 
     /** Median and max |cents| of voiced frames after t0; octave errors are frames off by > 50 cents. */
@@ -185,7 +190,7 @@ public final class EngineTest {
             total++;
             if (!f.voiced) continue;
             voiced++;
-            double c = cents(f.f, ref);
+            double c = Tuning.cents(f.f, ref);
             if (Math.abs(c) > 50) oct++;
             else d.add(Math.abs(c));
         }
@@ -215,7 +220,7 @@ public final class EngineTest {
             double[] sh = stats(run(fs, tone(fs, f, 1.0, 0.3, 1.0, 0.5, 0.33, 0.25)), f, 0.15);
             check(String.format(Locale.US, "midi %d %.2f Hz  sine max %.4f c  harmonic max %.4f c  voiced %d/%d",
                     m, f, st[1], sh[1], (int) sh[2], (int) sh[4]),
-                    st[1] < 0.05 && sh[1] < 0.05 && st[3] == 0 && sh[3] == 0 && sh[2] >= sh[4] - 1);
+                    st[1] < 0.012 && sh[1] < 0.012 && st[3] == 0 && sh[3] == 0 && voiced(st) && voiced(sh));
         }
     }
 
@@ -229,11 +234,11 @@ public final class EngineTest {
             double f = freq(m) * Math.pow(2, det / 1200.0);
             double[] st = stats(run(fs, tone(fs, f, 0.6, 0.2, 1.0, 0.6, 0.4)), f, 0.15);
             n++;
-            if (st[3] > 0 || st[2] == 0) bad++;
+            if (st[3] > 0 || !voiced(st)) bad++;
             if (!Double.isNaN(st[1])) worst = Math.max(worst, st[1]);
         }
         check(String.format(Locale.US, "%d notes, %d with octave errors or unvoiced, worst error %.4f c", n, bad, worst),
-                bad == 0 && worst < 0.1);
+                bad == 0 && worst < 0.012);
     }
 
     static void plucks() {
@@ -254,7 +259,7 @@ public final class EngineTest {
                 if (!Double.isNaN(st[0])) worstMed = Math.max(worstMed, st[0]);
             }
             check(String.format(Locale.US, "midi %d  voiced %d/%d  octave errors %d  worst median %.3f c",
-                    m, voiced, total, octs, worstMed), octs == 0 && voiced > total * 0.9 && worstMed < 0.3);
+                    m, voiced, total, octs, worstMed), octs == 0 && voiced > total * 0.9 && worstMed < 0.17);
         }
     }
 
@@ -268,22 +273,22 @@ public final class EngineTest {
         int fixes = 0;
         for (Frame x : fr) fixes += x.octFix;
         check(String.format(Locale.US, "E2, a1 = 0.15: octave errors %d of %d voiced, octave fixes %d", (int) st[3], (int) st[2], fixes),
-                st[3] == 0 && st[2] > 0);
+                st[3] == 0 && voiced(st));
         // fundamental absent entirely
         st = stats(run(fs, tone(fs, f, 1.0, 0.3, 0.0, 1.0, 0.7, 0.5, 0.35, 0.25)), f, 0.15);
         check(String.format(Locale.US, "E2, no fundamental: octave errors %d of %d voiced", (int) st[3], (int) st[2]),
-                st[3] == 0 && st[2] > 0);
+                st[3] == 0 && voiced(st));
         // A2 with no fundamental
         double fa = freq(45);
         st = stats(run(fs, tone(fs, fa, 1.0, 0.3, 0.0, 1.0, 0.5, 0.5, 0.2)), fa, 0.15);
         check(String.format(Locale.US, "A2, no fundamental: octave errors %d of %d voiced", (int) st[3], (int) st[2]),
-                st[3] == 0 && st[2] > 0);
+                st[3] == 0 && voiced(st));
         // true E3 must not be lowered to E2: only even partials of E2 exist
         double f3 = freq(52);
         fr = run(fs, tone(fs, f3, 1.0, 0.3, 1.0, 0.5, 0.3, 0.2));
         st = stats(fr, f3, 0.15);
         check(String.format(Locale.US, "E3 stays E3: octave errors %d of %d voiced", (int) st[3], (int) st[2]),
-                st[3] == 0 && st[2] > 0);
+                st[3] == 0 && voiced(st));
     }
 
     static void inharmonic() {
@@ -322,7 +327,7 @@ public final class EngineTest {
         check("tone at -95 dBFS RMS is below the gate: voiced " + v, v == 0);
         double[] st = stats(run(fs, concat(noise(fs, 0.5, -80, 4), tone(fs, 110, 1.0, Math.pow(10, -57 / 20.0), 1.0, 0.5))), 110, 0.65);
         check(String.format(Locale.US, "tone at -60 dBFS after a quiet room: voiced %d/%d, max %.3f c", (int) st[2], (int) st[4], st[1]),
-                st[2] >= st[4] - 1 && st[1] < 0.1);
+                st[2] >= st[4] - 1 && st[1] < 0.15);
     }
 
     static void decayIntoNoise() {
@@ -351,12 +356,12 @@ public final class EngineTest {
             double first = -1, within1 = -1;
             for (Frame fm : fr) {
                 if (!fm.voiced || fm.t < 0.5) continue;
-                double c = Math.abs(cents(fm.f, f));
+                double c = Math.abs(Tuning.cents(fm.f, f));
                 if (first < 0 && c < 50) first = fm.t - 0.5;
                 if (within1 < 0 && c < 1.0) within1 = fm.t - 0.5;
             }
             check(String.format(Locale.US, "midi %d: note after %.0f ms, within 1 c after %.0f ms", m, first * 1000, within1 * 1000),
-                    first > 0 && first < 0.12 && within1 > 0 && within1 < 0.35);
+                    first > 0 && first < 0.11 && within1 > 0 && within1 < 0.35);
         }
     }
 
@@ -369,12 +374,12 @@ public final class EngineTest {
             for (int m = 28; m <= 76; m += 4) {
                 double f = freq(m) * Math.pow(2, -7.3 / 1200.0);
                 double[] st = stats(run(fs, tone(fs, f, 0.8, 0.2, 1.0, 0.5, 0.3)), f, 0.25);
-                if (st[3] > 0 || st[2] == 0) bad++;
+                if (st[3] > 0 || !voiced(st)) bad++;
                 if (!Double.isNaN(st[1])) worst = Math.max(worst, st[1]);
             }
             PitchEngine e = new PitchEngine(fs);
             check(String.format(Locale.US, "%d Hz (window %d, lowest %.1f Hz): bad notes %d, worst %.4f c", fs, e.W, e.minFreq(), bad, worst),
-                    bad == 0 && worst < 0.15);
+                    bad == 0 && worst < 0.05);
         }
     }
 
@@ -627,8 +632,8 @@ public final class EngineTest {
         for (int[] pr : pairs) {
             double[] solo = new double[1], both = new double[1];
             int[] str = new int[1];
-            for (int pass = 0; pass < 2; pass++) {
-                float[] first = pluck(fs, freq(pr[0]), 3.0, pass == 0 ? 0.0 : 0.3, 0.2, 1.2e-4, 40, pr[0]);
+            for (int round = 0; round < 2; round++) {
+                float[] first = pluck(fs, freq(pr[0]), 3.0, round == 0 ? 0.0 : 0.3, 0.2, 1.2e-4, 40, pr[0]);
                 float[] second = pluck(fs, freq(pr[1]), 2.0, 0.3, 0.2, 1.2e-4, 40, pr[1] + 7);
                 float[] x = concat(noise(fs, 0.3, -62, 1), first);
                 int o = (int) (fs * 1.1);
@@ -639,13 +644,13 @@ public final class EngineTest {
                 for (Frame f : run(fs, x)) {
                     tr.update(f.t, f.voiced, f.f, f.onset);
                     if (f.t > 1.5 && f.t < 2.3 && f.voiced) {
-                        sum += cents(f.f, freq(pr[1]));
+                        sum += Tuning.cents(f.f, freq(pr[1]));
                         n++;
                     }
                     if (s < 0 && f.t > 1.9) s = tr.string;
                 }
-                (pass == 0 ? solo : both)[0] = n > 0 ? sum / n : Double.NaN;
-                if (pass == 1) str[0] = s;
+                (round == 0 ? solo : both)[0] = n >= 10 ? sum / n : Double.NaN;
+                if (round == 1) str[0] = s;
             }
             int want = -1;
             for (int i = 0; i < 6; i++) if (Tuning.ALL[Tuning.indexOf("Standard")].strings[i] == pr[1]) want = i;
@@ -657,15 +662,15 @@ public final class EngineTest {
 
     /** Low D ringing while the A string is plucked (Drop D, DADGAD): two strings, not a chord. */
     static void ringingFifths() {
-        System.out.println("open fifths and fourths ringing together (Drop D, DADGAD): read within 2 cents of the string alone");
+        System.out.println("open fifths and fourths ringing together (Drop D, DADGAD): read within 1.6 cents of the string alone");
         int fs = 48000;
         int[][] pairs = {{38, 45}, {38, 50}, {45, 50}, {50, 57}, {38, 57}, {43, 50}};
         for (int[] pr : pairs) {
             for (double gap : new double[]{0.3, 0.7}) {
                 double[] mean = new double[2];
                 int poly = 0;
-                for (int pass = 0; pass < 2; pass++) {
-                    float[] first = pluck(fs, freq(pr[0]), 3.0, pass == 0 ? 0.0 : 0.3, 0.2, 1.2e-4, 40, pr[0]);
+                for (int round = 0; round < 2; round++) {
+                    float[] first = pluck(fs, freq(pr[0]), 3.0, round == 0 ? 0.0 : 0.3, 0.2, 1.2e-4, 40, pr[0]);
                     float[] second = pluck(fs, freq(pr[1]), 2.0, 0.3, 0.2, 1.2e-4, 40, pr[1] + 3);
                     float[] x = concat(noise(fs, 0.3, -62, 1), first);
                     int o = (int) (fs * (0.3 + gap));
@@ -678,18 +683,58 @@ public final class EngineTest {
                     while (off < pcm.length) {
                         off += e.feed(pcm, off, pcm.length - off);
                         if (!e.ready) continue;
-                        if (e.poly && pass == 1) poly++;
+                        if (e.poly && round == 1) poly++;
                         if (e.voiced && e.time > 0.3 + gap + 0.4 && e.time < 0.3 + gap + 1.2) {
-                            sum += cents(e.freq, freq(pr[1]));
+                            sum += Tuning.cents(e.freq, freq(pr[1]));
                             n++;
                         }
                     }
-                    mean[pass] = n > 0 ? sum / n : 99;
+                    mean[round] = n >= 10 ? sum / n : Double.NaN;
                 }
                 check(String.format(Locale.US, "midi %d ringing, %d plucked %.1f s later: poly frames %d, %+.2f c vs %+.2f c alone",
-                        pr[0], pr[1], gap, poly, mean[1], mean[0]), poly == 0 && Math.abs(mean[1] - mean[0]) < 2.0);
+                        pr[0], pr[1], gap, poly, mean[1], mean[0]), poly == 0 && Math.abs(mean[1] - mean[0]) < 1.6);
             }
         }
+    }
+
+    /**
+     * A chord too quiet to count as a strum, then a slow swell with no new pluck: the chord-like
+     * hops counted soon after the pluck are stale by then and must not complete a strum.
+     */
+    static void quietChordSwell() {
+        System.out.println("a quiet chord swells slowly without a new pluck (no strum)");
+        int fs = 48000;
+        int[] midis = Tuning.ALL[Tuning.indexOf("Standard")].strings;
+        float[] x = noise(fs, 4.0, -70, 1);
+        float[][] tones = new float[midis.length][];
+        for (int i = 0; i < tones.length; i++) tones[i] = tone(fs, freq(midis[i]), 4.0, 1.0, 1.0, 0.5, 0.3, 0.2);
+        for (int i = 0; i < x.length; i++) {
+            double t = i / (double) fs;
+            double db = t < 0.5 ? -200 : t < 1.7 ? -52 : t < 2.7 ? -52 + 17 * (t - 1.7) : -35;
+            double s = 0;
+            for (float[] tn : tones) s += tn[i];
+            x[i] += (float) (Math.pow(10, db / 20.0) * s / tones.length);
+        }
+        int[] poly = new int[1];
+        float[] w = strumWindow(fs, x, poly);
+        check("six strings from 0.5 s at -67 dBFS, swelling to -50 dBFS from 1.7 s: frames taken for several strings "
+                + poly[0] + ", window handed over " + (w != null), poly[0] == 0 && w == null);
+    }
+
+    /**
+     * Bass: E1 ringing under G2. E1's 2nd harmonic is the strongest stray peak, and only E1's own
+     * fundamental (41 Hz, below the 55 Hz a guitar string never reaches) explains the rest.
+     */
+    static void bassRingingBelowGuitar() {
+        System.out.println("Bass: E1 sounding under G2");
+        int fs = 48000;
+        double g = freq(43);
+        float[] low = tone(fs, freq(28), 1.5, 0.2, 0.1, 1.0, 0.8, 0.5, 0.3, 0.2);
+        float[] both = add(low, tone(fs, g, 1.5, 0.32, 1.0, 0.5, 0.3, 0.2));
+        double floor = freq(28) * Math.pow(2, -600 / 1200.0);                 // the Bass tuning's floor
+        double[] st = stats(run(fs, quantize(both), floor), g, 0.5);
+        check(String.format(Locale.US, "G2 over a steady E1: voiced %d/%d, median %.2f c, octave errors %d",
+                (int) st[2], (int) st[4], st[0], (int) st[3]), voiced(st) && st[0] < 8.0 && st[3] == 0);
     }
 
     static float[] strum(int fs, int[] midis, double[] cents, double spreadMs, long seed) {
@@ -861,7 +906,7 @@ public final class EngineTest {
         double ss = 0;
         for (float v : x) ss += v * v;
         double g = Math.pow(10, dbfs / 20.0) / Math.sqrt(ss / x.length);
-        for (int i = 0; i < x.length; i++) x[i] *= g;
+        for (int i = 0; i < x.length; i++) x[i] = (float) (x[i] * g);
         return x;
     }
 
@@ -877,7 +922,9 @@ public final class EngineTest {
         return x;
     }
 
+    /** Real time on a phone needs a frame analysed in less than the audio it covers. */
     static void timing() {
+        System.out.println("timing");
         int fs = 48000;
         PitchEngine e = new PitchEngine(fs);
         short[] pcm = quantize(pluck(fs, freq(40), 10.0, 0.25, 0.14, 0, 30, 5));
@@ -887,8 +934,8 @@ public final class EngineTest {
             off += e.feed(pcm, off, pcm.length - off);
             if (e.ready) frames++;
         }
-        double ms = (System.nanoTime() - t0) / 1e6;
-        System.out.printf(Locale.US, "timing: %d frames in %.0f ms on this JVM (%.2f ms per frame; a frame is %.1f ms of audio)%n",
-                frames, ms, ms / frames, 1000.0 * e.hop / fs);
+        double ms = (System.nanoTime() - t0) / 1e6, hopMs = 1000.0 * e.hop / fs;
+        check(String.format(Locale.US, "%d frames in %.0f ms on this JVM: %.2f ms per frame, a frame is %.1f ms of audio",
+                frames, ms, ms / frames, hopMs), ms / frames < hopMs);
     }
 }

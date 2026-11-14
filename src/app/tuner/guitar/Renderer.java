@@ -26,11 +26,29 @@ final class Renderer {
             H_A4_PREV = 10, H_A4_NEXT = 11, H_TOL_PREV = 12, H_TOL_NEXT = 13,
             H_NEEDLE_PREV = 14, H_NEEDLE_NEXT = 15, H_NAMES_PREV = 16, H_NAMES_NEXT = 17,
             H_HAPTIC = 18, H_KEEPON = 20, H_STRING = 32,
-            H_GUIDE = 21, H_GUIDE_SKIP = 22, H_GUIDE_AGAIN = 23, H_GUIDE_DONE = 24, H_GUIDE_OPEN = 25,
+            H_GUIDE = 21, H_GUIDE_SKIP = 22, H_GUIDE_AGAIN = 23, H_GUIDE_OPEN = 25,
             H_GSTRING = 40, H_SUGGEST = 27, H_GUIDE_AUTO = 28;
 
     static final float SCALE_DEG = 75f;     // bead angle at the far end of the scale
     static final float SCALE_CENTS = 58f;   // tanh knee: 50 cents sit at 52 deg
+    /** The guide's meter compresses less than the dial's: beginners start far off. */
+    static final double GUIDE_CENTS = 90.0;
+
+    private static final String DASH = "–", SEP = "  ·  ";
+    private static final String[] ASCII = new String[128];
+    static {
+        for (int i = 0; i < ASCII.length; i++) ASCII[i] = String.valueOf((char) i);
+    }
+    private static final int STRUM_MAX = 250;       // StrumAnalyzer searches within +-250 cents
+    private static final String[] STRUM_LABELS = new String[2 * STRUM_MAX + 1];
+
+    /** Where a wrapped string breaks; kept for as long as its string, width and font stay the same. */
+    private static final class Wrap {
+        String src, first, second;
+        float maxW, size;
+        Typeface tf;
+        boolean one;
+    }
 
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -39,7 +57,11 @@ final class Renderer {
     private final Path path = new Path();
     private final RectF rect = new RectF();
     private final Typeface light, regular;
+    private final Wrap[] wraps = new Wrap[16];
+    private int wrapNext;
+    private String sentenceSrc = "", sentence = "";   // first sentence of the guide's advice
 
+    // set by draw() for the frame
     private Ui u;
     private float dp, sp;
     private float a = 1f;            // alpha multiplier for the layer being drawn
@@ -48,6 +70,9 @@ final class Renderer {
     private boolean tight;           // short window: header and bottom bar closer to the edges
     private float headerCy, barCy;
     private float clipT = Float.NEGATIVE_INFINITY, clipB = Float.POSITIVE_INFINITY;
+
+    // set by drawGuidePage(): what the window leaves room for
+    private boolean pillsShown, captionShown, titleShown, meterDetail, meterCompact;
 
     Renderer(Typeface light, Typeface regular) {
         this.light = light;
@@ -61,6 +86,10 @@ final class Renderer {
 
     static float beadOf(double cents) {
         return (float) Math.tanh(cents / SCALE_CENTS);
+    }
+
+    static float guideBeadOf(double cents) {
+        return (float) Math.tanh(cents / GUIDE_CENTS);
     }
 
     void draw(Canvas c, Ui ui) {
@@ -161,8 +190,7 @@ final class Renderer {
         float stackedR = rawDialRadius(H - tuningH - rowDecide, usable);
         float colW = usable / 2f;
         float sideR = rawDialRadius(H, colW);
-        if (stackedR < 100f * dp && sideR >= 32f * dp && sideR > Math.max(stackedR, 0f) * 1.15f
-                && usable >= 2f * (2f * sideR + 40f * dp)) {
+        if (stackedR < 100f * dp && sideR >= 32f * dp && sideR > Math.max(stackedR, 0f) * 1.15f) {
             // short wide window: dial on the left, tuning and strings on the right
             sideR = Math.min(sideR, 190f * dp);
             float ext = dialTopExtra(sideR);
@@ -272,34 +300,17 @@ final class Renderer {
             float sn = (float) Math.sin(th), cs = (float) Math.cos(th);
             float bx = cx + R * sn, by = cy - R * cs;
             float lv = u.liveT;
-            fill.setColor(col(p.bg, nt));                             // hides the dial line; hollow when held
-            c.drawCircle(bx, by, b, fill);
-            if (lv > 0.001f) {
-                fill.setColor(col(p.accent, nt * lv));
-                c.drawCircle(bx, by, b, fill);
-            }
-            stroke.setStrokeWidth(1.25f * dp);
-            stroke.setColor(col(Palette.mix(p.dim, p.accent, lv), nt));
-            c.drawCircle(bx, by, b, stroke);
+            bead(c, p, bx, by, b, nt, lv);
             if (lv > 0.001f) {
                 stroke.setStrokeWidth(1f * dp);
-                stroke.setColor(col(p.onAccent, nt * lv * 0.8f));
+                stroke.setColor(col(p.onAccentText, nt * lv));
                 float k = b * 0.34f;
                 c.drawLine(bx - k * sn, by + k * cs, bx + k * sn, by - k * cs, stroke);
             }
         }
 
         // target ring on top: a marking on the glass
-        float ty = cy - R;
-        stroke.setStrokeWidth((1f + 1.25f * tune) * dp);
-        stroke.setColor(col(Palette.mix(p.dim, p.accent, tune)));
-        c.drawCircle(cx, ty, tr, stroke);
-        if (u.pulseT >= 0f) {
-            float q = u.pulseT;
-            stroke.setStrokeWidth(1.5f * dp);
-            stroke.setColor(col(p.accent, (1f - q) * 0.8f));
-            c.drawCircle(cx, ty, tr + q * b * 2f, stroke);
-        }
+        targetRing(c, p, cx, cy - R, tr, tune, b * 2f);
     }
 
     private void drawReadout(Canvas c, Palette p, float cx, float cy, float R, boolean active) {
@@ -333,14 +344,14 @@ final class Renderer {
         }
 
         // note
-        int noteCol = Palette.mix(Palette.mix(p.dim, p.fg, 0.45f + 0.55f * lv), p.accentText, tune);
+        int noteCol = readoutColor(p, lv, tune);
         if (u.letter == 0 && u.readCheck) {
             check(c, cx, base - noteSz * 0.33f, noteSz * 0.3f, 1f, col(p.accentText));
         } else if (u.letter == 0) {
             text.setTypeface(light);
             text.setTextSize(noteSz * 0.8f);
             text.setColor(col(p.dim, 0.8f));
-            c.drawText("–", cx, base - noteSz * 0.08f, text);
+            c.drawText(DASH, cx, base - noteSz * 0.08f, text);
         } else {
             drawNote(c, p, u.letter, u.accidental, u.octave, cx, base, noteSz, noteCol);
         }
@@ -349,7 +360,7 @@ final class Renderer {
         if (u.cents.length() > 0) {
             text.setTypeface(light);
             text.setTextSize(centsSz);
-            text.setColor(col(u.centsAccent ? p.accentText : Palette.mix(Palette.mix(p.dim, p.fg, 0.45f + 0.55f * lv), p.accentText, tune)));
+            text.setColor(col(u.centsAccent ? p.accentText : readoutColor(p, lv, tune)));
             fitLine(c, u.cents, cx, centsBase, chord(R, (centsBase - cy) / R));
         }
         boolean pill = u.readPill.length() > 0 && !compact;
@@ -362,25 +373,30 @@ final class Renderer {
         text.setTypeface(regular);
         text.setTextSize(detSz);
         float maxW = chord(R, Math.min(0.95f, (detBase - cy) / R + 0.04f));
-        String line;
-        boolean both = u.hint.length() > 0 && u.freq.length() > 0;
         boolean tapDial = compact && u.readPill.length() > 0;
+        boolean both = !tapDial && u.hint.length() > 0 && u.freq.length() > 0;
+        float w1 = 0f, w2 = 0f, w3 = 0f;
+        if (both) {
+            w1 = text.measureText(u.hint);
+            w2 = text.measureText(SEP);
+            w3 = text.measureText(u.freq);
+        }
+        String line;
         if (tapDial) {
             // no room for a button: the action is the hint, and the whole dial is its target
             line = u.readPill;
             if (active) hit(H_SUGGEST, cx - R, cy - R, cx + R, cy + R, cx, cy, R * 0.92f);
-        } else if (both && text.measureText(u.hint + "  ·  " + u.freq) <= maxW) line = null;
+        } else if (both && w1 + w2 + w3 <= maxW) line = null;
         else line = u.hint.length() > 0 ? u.hint : u.freq;
         float y = detBase;
         if (line == null) {
-            String sep = "  ·  ";
-            float w1 = text.measureText(u.hint), w2 = text.measureText(sep), w3 = text.measureText(u.freq);
             float x = cx - (w1 + w2 + w3) / 2f;
             text.setTextAlign(Paint.Align.LEFT);
             text.setColor(col(u.hintAccent ? p.accentText : p.dim));
             c.drawText(u.hint, x, y, text);
             text.setColor(col(p.dim));
-            c.drawText(sep + u.freq, x + w1, y, text);
+            c.drawText(SEP, x + w1, y, text);
+            c.drawText(u.freq, x + w1 + w2, y, text);
             text.setTextAlign(Paint.Align.CENTER);
         } else {
             boolean accent = u.hintAccent && line == u.hint || tapDial;
@@ -397,7 +413,7 @@ final class Renderer {
     /** Small dial: the note and the cents only. */
     private void drawReadoutSmall(Canvas c, Palette p, float cx, float cy, float R) {
         float lv = u.liveT, tune = u.tuneT;
-        int col = Palette.mix(Palette.mix(p.dim, p.fg, 0.45f + 0.55f * lv), p.accentText, tune);
+        int col = readoutColor(p, lv, tune);
         boolean cents = u.cents.length() > 0 && R >= 30f * dp;
         float noteSz = R * (cents ? 0.62f : 0.8f);
         float centsSz = R * 0.24f;
@@ -408,7 +424,7 @@ final class Renderer {
             text.setTypeface(light);
             text.setTextSize(noteSz * 0.8f);
             text.setColor(col(p.dim, 0.8f));
-            c.drawText("–", cx, base - noteSz * 0.08f, text);
+            c.drawText(DASH, cx, base - noteSz * 0.08f, text);
         } else {
             drawNote(c, p, u.letter, u.accidental, u.octave, cx, base, noteSz, col);
         }
@@ -430,16 +446,16 @@ final class Renderer {
         boolean pill = u.messageAction.length() > 0;
         float ph = Math.min(40f * dp, Math.max(28f * dp, h * 0.3f));
         float gap = 8f * dp;
-        float textH = msz * 1.3f * Math.max(1, lines(u.message, w));
+        float textH = msz * 1.3f * lines(u.message, w);
         float total = textH + (pill ? gap + ph : 0f);
         float y0 = cy - total / 2f;
         wrapped(c, u.message, cx, y0 + textH / 2f, w, msz * 1.3f);
         if (pill) pill(c, p, u.messageAction, cx, y0 + textH + gap + ph / 2f, H_MIC, active, true, w, ph);
+        else if (active) hit(H_MIC, cx - w / 2f, y0, cx + w / 2f, y0 + textH, 0f, 0f, -1f);
     }
 
     private int lines(String s, float w) {
-        float tw = text.measureText(s);
-        return tw <= w ? 1 : 2;
+        return wrap(s, w).one ? 1 : 2;
     }
 
     private void drawMessage(Canvas c, Palette p, float cx, float cy, float R, boolean active) {
@@ -450,10 +466,14 @@ final class Renderer {
         boolean pill = u.messageAction.length() > 0;
         float ph = Math.min(40f * dp, R * 0.42f);
         float my = pill ? cy - ph * 0.5f - Math.max(8f * dp, R * 0.08f) : cy;
-        wrapped(c, u.message, cx, my - (pill ? msz * 0.65f : 0f), chord(R, 0.3f), msz * 1.3f);
+        float mw = chord(R, 0.3f), lh = msz * 1.3f, midY = my - (pill ? msz * 0.65f : 0f);
+        wrapped(c, u.message, cx, midY, mw, lh);
         if (pill) {
             pill(c, p, u.messageAction, cx, cy + ph * 0.5f + Math.max(4f * dp, R * 0.06f), H_MIC, active, true,
                     Math.min(1.3f * R, usable - 48f * dp), ph);
+        } else if (active) {
+            float half = lh * lines(u.message, mw) / 2f;
+            hit(H_MIC, cx - mw / 2f, midY - half, cx + mw / 2f, midY + half, 0f, 0f, -1f);
         }
     }
 
@@ -462,7 +482,7 @@ final class Renderer {
         text.setTypeface(light);
         text.setTextSize(size);
         text.setColor(col(color));
-        String L = String.valueOf(letter);
+        String L = glyph(letter);
         float lw = text.measureText(L);
         c.drawText(L, cx, base, text);
         float cap = size * 0.70f;
@@ -531,27 +551,9 @@ final class Renderer {
         for (int i = 0; i < n; i++) {
             float x = cx + (i - (n - 1) / 2f) * s;
             float tt = u.sTunedT[i], tg = u.sTargetT[i], lk = u.sLockT[i];
-            if (tt > 0.001f) {
-                fill.setColor(col(p.accent, tt));
-                c.drawCircle(x, cy, sr, fill);
-            }
-            if (tt < 0.999f) {
-                stroke.setStrokeWidth((1f + 0.5f * tg) * dp);
-                stroke.setColor(col(Palette.mix(Palette.alpha(p.dim, 0.7f), p.accent, tg), 1f - tt));
-                c.drawCircle(x, cy, sr, stroke);
-            }
+            stringCircle(c, p, x, cy, sr, tt, tg, 0.5f);
             int tc = Palette.mix(Palette.mix(p.fg, p.accentText, tg), p.onAccentText, tt);
-            text.setTypeface(regular);
-            text.setTextSize(tsz);
-            text.setColor(col(tc));
-            String L = String.valueOf(u.sLetter[i]);
-            float lw = text.measureText(L);
-            int acc = u.sAcc[i];
-            float cap = tsz * 0.70f, ah = cap * 0.62f, aw = acc == 0 ? 0f : (acc == 1 ? ah * 0.62f : ah * 0.45f) + tsz * 0.06f;
-            float lx = x - aw / 2f;
-            float baseY = cy + cap / 2f;
-            c.drawText(L, lx, baseY, text);
-            if (acc != 0) accidental(c, acc, lx + lw / 2f + tsz * 0.06f, baseY - cap, ah, Math.max(1f * dp, tsz * 0.07f), col(tc));
+            letter(c, u.sLetter[i], u.sAcc[i], x, cy, tsz, col(tc));
             float st = u.strumT;
             if (lk > 0.001f && st < 0.5f) {
                 fill.setColor(col(p.accent, lk * (1f - 2f * st)));
@@ -566,15 +568,14 @@ final class Renderer {
                     text.setTypeface(regular);
                     text.setTextSize(11f * sp);
                     text.setColor(col(p.dim));
-                    c.drawText("–", x, my + 4f * sp, text);
+                    c.drawText(DASH, x, my + 4f * sp, text);
                 } else if (Math.abs(sc) <= u.strumOk) {
                     check(c, x, my, 4f * dp, 1f, col(p.accentText));
                 } else {
                     text.setTypeface(regular);
                     text.setTextSize(11f * sp);
                     text.setColor(col(p.fg));
-                    int r = Math.round(sc);
-                    c.drawText((r < 0 ? "−" : "+") + Math.abs(r), x, my + 4f * sp, text);
+                    c.drawText(strumLabel(Math.round(sc)), x, my + 4f * sp, text);
                 }
                 a = base2;
             }
@@ -724,10 +725,11 @@ final class Renderer {
         float top = headerCy + (tight ? 22f : 30f) * dp;
         int n = u.stringCount;
         float minRow = 30f * dp, maxRow = 46f * dp;
-        // What fits, given up in this order: the strings' line diagram (becomes a row of circles,
-        // then goes; or, wide enough, moves beside the words), the sub-line, the meter's labels
-        // and second line, the caption, the advice line, the title, the Skip / Auto row.
-        // Nothing is drawn over anything else.
+        // What fits, given up in this order as the window shortens: the strings' line diagram
+        // (first a row of circles, then nothing; or, wide enough, it sits beside the words), the
+        // sub-line, the meter's labels and second line, the caption, the advice line, the title, the
+        // Skip / Auto row. Nothing is drawn over anything else, and nothing given up comes back
+        // while the height only shrinks.
         pillsShown = true;
         captionShown = true;
         titleShown = true;
@@ -741,11 +743,13 @@ final class Renderer {
         float textW = side ? Math.min(colW - 32f * dp, 400f * dp) : wideW;
         float meterW = side ? Math.min(colW - 32f * dp, 320f * dp) : Math.min(usable - 48f * dp, 340f * dp);
         float H = guideBottom() - top;
+        float rowsH = H;                  // before the Skip / Auto row can be given up and hand back room
         float bare = guideTextH(textW, false);
         // Skip / Next and Auto switch go last, in windows under ~260 dp tall; tapping the meter
         // then does what Next did (TunerView).
-        for (int step = 0; step < 5 && bare + gap + guideMeterH() > H; step++) {
-            switch (step) {
+        int steps = 0;
+        for (; steps < 5 && bare + gap + guideMeterH() > H; steps++) {
+            switch (steps) {
                 case 0: meterCompact = true; gap = 12f * dp; break;
                 case 1: captionShown = false; break;
                 case 2: meterDetail = false; break;
@@ -755,31 +759,22 @@ final class Renderer {
             H = guideBottom() - top;
             bare = guideTextH(textW, false);
         }
+        // Past the first step the strings and the sub-line are long gone: shrinking the meter must
+        // not bring them back, or the page flickers while the window shortens.
+        boolean trimmed = steps > 0;
         H = Math.max(1f, H);
         float meterH = guideMeterH();
         float full = guideTextH(textW, true);
 
         if (!side) {
-            boolean showSub = H - full - meterH - 2f * gap >= n * minRow;
-            float textH = showSub ? full : bare;
-            float rows = H - textH - meterH - 2f * gap;
             float dW = Math.min(usable - 40f * dp, 420f * dp);
             float cr = clamp(dW / n / 2f - 6f * dp, 12f * dp, 18f * dp), compactH = 2f * cr + 12f * dp;
-            boolean diag = rows >= n * minRow;
-            boolean compact = false;
-            if (!diag) {
-                if (H - full - meterH - 2f * gap >= compactH) {
-                    showSub = true;
-                    compact = true;
-                } else if (H - bare - meterH - 2f * gap >= compactH) {
-                    showSub = false;
-                    compact = true;
-                } else {
-                    showSub = false;
-                }
-                textH = showSub ? full : bare;
-            }
-            float blockH = diag ? n * clamp(rows / n, minRow, maxRow) : compact ? compactH : 0f;
+            float spare = H - full - meterH - 2f * gap;          // left for the strings with the sub-line kept
+            boolean diag = !trimmed && spare >= n * minRow;
+            boolean compact = !trimmed && !diag && spare >= compactH;
+            boolean showSub = !trimmed && (diag || compact || H - full - meterH - gap >= 0f);
+            float textH = showSub ? full : bare;
+            float blockH = diag ? n * clamp(spare / n, minRow, maxRow) : compact ? compactH : 0f;
             float rowH = diag ? blockH / n : 0f;
             boolean strings = diag || compact;
             float used = textH + (strings ? gap + blockH : 0f) + gap + meterH;
@@ -799,11 +794,11 @@ final class Renderer {
             // wide: strings on the left, words and meter on the right
             float rowH = Math.min(maxRow, H / n);
             float sideW = colW - 40f * dp;
-            if (rowH >= 18f * dp) {
+            if (Math.min(maxRow, rowsH / n) >= 18f * dp) {
                 drawGuideStrings(c, p, left + 24f * dp, left + 24f * dp + sideW, top + Math.max(0f, (H - n * rowH) / 2f), rowH, active);
             }
             float rcx = left + colW * 1.5f;
-            boolean sub = full + gap + meterH <= H;
+            boolean sub = !trimmed && full + gap + meterH <= H;
             float th = sub ? full : bare;
             float y = top + Math.max(0f, (H - th - gap - meterH) / 2f);
             y = drawGuideText(c, p, rcx, y, textW, sub);
@@ -813,14 +808,10 @@ final class Renderer {
         if (pillsShown) drawGuidePills(c, p, active);
     }
 
-    private boolean pillsShown = true, captionShown = true, titleShown = true, meterDetail = true;
-
     /** Bottom of the guide's content: above its own buttons, or above the bottom bar without them. */
     private float guideBottom() {
         return pillsShown ? guidePillY() - (tight ? 30f : 36f) * dp : barCy - (tight ? 30f : 36f) * dp;
     }
-
-    private boolean meterCompact;
 
     private float guideMeterH() {
         if (meterCompact) return 22f * dp + 26f * sp * 1.2f + (meterDetail ? 14f * sp * 1.4f : 0f);
@@ -831,7 +822,7 @@ final class Renderer {
         text.setTypeface(light);
         text.setTextSize(26f * sp);
         float h = (captionShown ? 22f * dp : 0f) + (titleShown ? lines(u.gTitle, w) * 26f * sp * 1.2f + 6f * dp : 0f);
-        if (sub && u.gSub.length() > 0) {
+        if (sub && titleShown && u.gSub.length() > 0) {
             text.setTypeface(regular);
             text.setTextSize(14f * sp);
             h += lines(u.gSub, w) * 14f * sp * 1.4f;
@@ -893,7 +884,7 @@ final class Renderer {
         float lx0 = cxC + r + 12f * dp, lx1 = x1;
         if (!u.guideDone) {
             float by = yTop + (u.gCursor + 0.5f) * rowH, inset = Math.min(3f * dp, rowH * 0.08f);
-            fill.setColor(col(p.accent, 0.10f));
+            fill.setColor(col(p.accent, Palette.ROW_TINT));
             rect.set(x0 - 10f * dp, by - rowH / 2f + inset, x1 + 10f * dp, by + rowH / 2f - inset);
             c.drawRoundRect(rect, rowH / 2f - inset, rowH / 2f - inset, fill);
         }
@@ -903,23 +894,15 @@ final class Renderer {
             float k = u.guideDone ? 0f : clamp(1f - Math.abs(i - u.gCursor), 0f, 1f);
             float tt = u.sTunedT[i];
             float th = (0.9f + 2.4f * u.gThick[i]) * dp;
-            int lineCol = Palette.mix(Palette.mix(p.line, p.dim, 0.5f), p.accent, k);
+            int lineCol = Palette.mix(Palette.mix(p.line, p.dim, 0.5f), p.accentStroke, k);
             stroke.setStrokeWidth(th);
             stroke.setColor(col(lineCol));
             if (i == u.gStep && !u.guideDone) liveString(c, p, lx0, lx1, y, rowH, i, n);
             else c.drawLine(lx0, y, lx1, y, stroke);
 
-            if (tt > 0.001f) {
-                fill.setColor(col(p.accent, tt));
-                c.drawCircle(cxC, y, r, fill);
-            }
-            if (tt < 0.999f) {
-                stroke.setStrokeWidth((1f + k) * dp);
-                stroke.setColor(col(Palette.mix(Palette.alpha(p.dim, 0.7f), p.accent, k), 1f - tt));
-                c.drawCircle(cxC, y, r, stroke);
-                letter(c, u.sLetter[i], u.sAcc[i], cxC, y, tsz, col(Palette.mix(p.fg, p.accentText, k), 1f - tt));
-            }
-            if (tt > 0.001f) check(c, cxC, y, r * 0.48f, tt, col(p.onAccent));
+            stringCircle(c, p, cxC, y, r, tt, k, 1f);
+            if (tt < 0.999f) letter(c, u.sLetter[i], u.sAcc[i], cxC, y, tsz, col(Palette.mix(p.fg, p.accentText, k), 1f - tt));
+            if (tt > 0.001f) check(c, cxC, y, r * 0.48f, tt, col(p.onAccentText));
             if (active) hit(H_GSTRING + i, x0 - 10f * dp, y - rowH / 2f, x1 + 10f * dp, y + rowH / 2f, cxC, y, r + 5f * dp);
         }
     }
@@ -933,17 +916,9 @@ final class Renderer {
             float x = cx + (i - (n - 1) / 2f) * s;
             float k = u.guideDone ? 0f : clamp(1f - Math.abs(i - u.gCursor), 0f, 1f);
             float tt = u.sTunedT[i];
-            if (tt > 0.001f) {
-                fill.setColor(col(p.accent, tt));
-                c.drawCircle(x, cy, r, fill);
-            }
-            if (tt < 0.999f) {
-                stroke.setStrokeWidth((1f + k) * dp);
-                stroke.setColor(col(Palette.mix(Palette.alpha(p.dim, 0.7f), p.accent, k), 1f - tt));
-                c.drawCircle(x, cy, r, stroke);
-                letter(c, u.sLetter[i], u.sAcc[i], x, cy, tsz, col(Palette.mix(p.fg, p.accentText, k), 1f - tt));
-            }
-            if (tt > 0.001f) check(c, x, cy, r * 0.48f, tt, col(p.onAccent));
+            stringCircle(c, p, x, cy, r, tt, k, 1f);
+            if (tt < 0.999f) letter(c, u.sLetter[i], u.sAcc[i], x, cy, tsz, col(Palette.mix(p.fg, p.accentText, k), 1f - tt));
+            if (tt > 0.001f) check(c, x, cy, r * 0.48f, tt, col(p.onAccentText));
             if (i == u.gStep && !u.guideDone) {
                 // waiting: a ring leaves the circle with each demonstration pluck; sounding: it breathes
                 float q = u.gPluckT >= 0.7f ? (u.gPluckT - 0.7f) / 0.8f : -1f;
@@ -1033,7 +1008,7 @@ final class Renderer {
                 fill.setColor(col(p.accent));
                 c.drawCircle(cx, my, R, fill);
             }
-            check(c, cx, my, 30f * dp * 0.45f, (u.gDoneT - 0.35f) / 0.65f, col(p.onAccent));
+            check(c, cx, my, 30f * dp * 0.45f, (u.gDoneT - 0.35f) / 0.65f, col(p.onAccentText));
             return;
         }
         float my = y0 + (meterCompact ? 12f : 18f) * dp, x0 = cx - w / 2f, x1 = cx + w / 2f;
@@ -1067,35 +1042,16 @@ final class Renderer {
             float off = (u.time * speed) % step;
             for (float d = off; d < span; d += step) {
                 float fadeIn = Math.min(1f, d / (8f * dp)), fadeOut = Math.min(1f, (span - d) / (8f * dp));
-                chevron(c, from + dir * d, my, dir, 4f * dp, 1.5f * dp, col(p.accent, 0.85f * u.gChevT * u.noteT * fadeIn * fadeOut));
+                chevron(c, from + dir * d, my, dir, 4f * dp, 1.5f * dp, col(p.accentStroke, Palette.CHEVRON_ALPHA * u.gChevT * u.noteT * fadeIn * fadeOut));
             }
         }
-        float nt = u.noteT, lv = u.liveT;
-        if (nt > 0.001f) {
-            fill.setColor(col(p.bg, nt));
-            c.drawCircle(bx, my, br, fill);
-            if (lv > 0.001f) {
-                fill.setColor(col(p.accent, nt * lv));
-                c.drawCircle(bx, my, br, fill);
-            }
-            stroke.setStrokeWidth(1.25f * dp);
-            stroke.setColor(col(Palette.mix(p.dim, p.accent, lv), nt));
-            c.drawCircle(bx, my, br, stroke);
-        }
+        if (u.noteT > 0.001f) bead(c, p, bx, my, br, u.noteT, u.liveT);
         if (tune > 0.001f) {
             fill.setColor(col(p.accent, tune));
             c.drawCircle(cx, my, tr, fill);
         }
-        stroke.setStrokeWidth((1f + 1.25f * tune) * dp);
-        stroke.setColor(col(Palette.mix(p.dim, p.accent, tune)));
-        c.drawCircle(cx, my, tr, stroke);
-        if (tune > 0.001f) check(c, cx, my, tr * 0.48f, tune, col(p.onAccent));
-        if (u.pulseT >= 0f) {
-            float q = u.pulseT;
-            stroke.setStrokeWidth(1.5f * dp);
-            stroke.setColor(col(p.accent, (1f - q) * 0.8f));
-            c.drawCircle(cx, my, tr + q * 22f * dp, stroke);
-        }
+        targetRing(c, p, cx, my, tr, tune, 22f * dp);
+        if (tune > 0.001f) check(c, cx, my, tr * 0.48f, tune, col(p.onAccentText));
 
         // what to do, in one word, and why
         float shake = u.gShakeT >= 0f ? 7f * dp * (float) Math.sin(u.gShakeT * 6.0 * Math.PI) * (1f - u.gShakeT) : 0f;
@@ -1112,8 +1068,7 @@ final class Renderer {
             if (!meterDetail) return;
             // one line: the first sentence of the advice, shrunk to fit its column if it must
             String d = u.gDetail;
-            int dot = d.indexOf(". ");
-            if (dot > 0 && text.measureText(d) > textMax) d = d.substring(0, dot + 1);
+            if (text.measureText(d) > textMax) d = firstSentence(d);
             text.setColor(col(p.dim));
             fitLine(c, d, cx, wy + ws * 0.6f + dl * 0.75f, textMax);
         } else {
@@ -1158,12 +1113,77 @@ final class Renderer {
         text.setTypeface(regular);
         text.setTextSize(tsz);
         text.setColor(color);
-        String L = String.valueOf(letter);
+        String L = glyph(letter);
         float lw = text.measureText(L);
         float cap = tsz * 0.70f, ah = cap * 0.62f, aw = acc == 0 ? 0f : (acc == 1 ? ah * 0.62f : ah * 0.45f) + tsz * 0.06f;
         float lx = x - aw / 2f, baseY = cy + cap / 2f;
         c.drawText(L, lx, baseY, text);
         if (acc != 0) accidental(c, acc, lx + lw / 2f + tsz * 0.06f, baseY - cap, ah, Math.max(1f * dp, tsz * 0.07f), color);
+    }
+
+    /** A string's circle: filled accent once tuned, else an outline that turns accent as it becomes the current one (k). */
+    private void stringCircle(Canvas c, Palette p, float x, float y, float r, float tuned, float k, float grow) {
+        if (tuned > 0.001f) {
+            fill.setColor(col(p.accent, tuned));
+            c.drawCircle(x, y, r, fill);
+        }
+        if (tuned < 0.999f) {
+            stroke.setStrokeWidth((1f + grow * k) * dp);
+            stroke.setColor(col(Palette.mix(Palette.alpha(p.dim, 0.7f), p.accentStroke, k), 1f - tuned));
+            c.drawCircle(x, y, r, stroke);
+        }
+    }
+
+    /** The needle's bead: bg-coloured so it hides what it rides over, filled accent while the pitch is live, hollow when held. */
+    private void bead(Canvas c, Palette p, float x, float y, float r, float noteT, float live) {
+        fill.setColor(col(p.bg, noteT));
+        c.drawCircle(x, y, r, fill);
+        if (live > 0.001f) {
+            fill.setColor(col(p.accent, noteT * live));
+            c.drawCircle(x, y, r, fill);
+        }
+        stroke.setStrokeWidth(1.25f * dp);
+        stroke.setColor(col(Palette.mix(p.dim, p.accentStroke, live), noteT));
+        c.drawCircle(x, y, r, stroke);
+    }
+
+    /** The target ring, turning accent and thicker as the pitch settles; a pulse leaves it on reaching pitch. */
+    private void targetRing(Canvas c, Palette p, float x, float y, float r, float tune, float pulseGrow) {
+        stroke.setStrokeWidth((1f + 1.25f * tune) * dp);
+        stroke.setColor(col(Palette.mix(p.dim, p.accentStroke, tune)));
+        c.drawCircle(x, y, r, stroke);
+        if (u.pulseT >= 0f) {
+            float q = u.pulseT;
+            stroke.setStrokeWidth(1.5f * dp);
+            stroke.setColor(col(p.accent, (1f - q) * 0.8f));
+            c.drawCircle(x, y, r + q * pulseGrow, stroke);
+        }
+    }
+
+    /** Note and cents colour: dim until a pitch is live, fg while it is, accent text once in tune. */
+    private static int readoutColor(Palette p, float live, float tune) {
+        return Palette.mix(Palette.mix(p.dim, p.fg, 0.45f + 0.55f * live), p.accentText, tune);
+    }
+
+    private static String glyph(char ch) {
+        return ch < ASCII.length ? ASCII[ch] : String.valueOf(ch);
+    }
+
+    private static String strumLabel(int cents) {
+        if (cents < -STRUM_MAX || cents > STRUM_MAX) return (cents < 0 ? "−" : "+") + Math.abs(cents);
+        String s = STRUM_LABELS[cents + STRUM_MAX];
+        if (s == null) s = STRUM_LABELS[cents + STRUM_MAX] = (cents < 0 ? "−" : "+") + Math.abs(cents);
+        return s;
+    }
+
+    /** The advice up to its first full stop, for the one line a compact meter has. */
+    private String firstSentence(String s) {
+        if (s != sentenceSrc && !s.equals(sentenceSrc)) {
+            sentenceSrc = s;
+            int dot = s.indexOf(". ");
+            sentence = dot > 0 ? s.substring(0, dot + 1) : s;
+        }
+        return sentence;
     }
 
     private static float smooth(float t) {
@@ -1213,7 +1233,7 @@ final class Renderer {
             if (f != null) {
                 float g = 3f * dp;
                 stroke.setStrokeWidth(2f * dp);
-                stroke.setColor(p.accent);
+                stroke.setColor(p.accentStroke);
                 if (f.vr > 0f) {
                     c.drawCircle(f.vx, f.vy, f.vr + g, stroke);
                 } else if (f.vr == 0f) {
@@ -1261,7 +1281,6 @@ final class Renderer {
         c.drawCircle(x + 4f * s, y + 4.5f * s, 3f * s, stroke);
     }
 
-    /** Tuning fork: the reference tone. Filled accent disc while it sounds. */
     /** Advanced tuner: the dial in miniature, a ring with its bead off-centre. Filled while on. */
     private void iconDial(Canvas c, Palette p, float x, float y, boolean on) {
         float s = dp;
@@ -1270,7 +1289,7 @@ final class Renderer {
         if (on) {
             fill.setColor(col(p.accent));
             c.drawCircle(x, y, 16f * s, fill);
-            color = col(p.onAccent);
+            color = col(p.onAccentText);
             hole = col(p.accent);
         } else {
             color = col(p.dim);
@@ -1288,12 +1307,13 @@ final class Renderer {
         c.drawLine(x, y + 1f * s - 3.5f * s, x, y + 1f * s + 0.5f * s, stroke);   // centre tick: the target
     }
 
+    /** Tuning fork: the reference tone. Filled accent disc while it sounds. */
     private void iconFork(Canvas c, Palette p, float x, float y, boolean on) {
         float s = dp;
         if (on) {
             fill.setColor(col(p.accent));
             c.drawCircle(x, y, 16f * s, fill);
-            stroke.setColor(col(p.onAccent));
+            stroke.setColor(col(p.onAccentText));
         } else {
             stroke.setColor(col(p.dim));
         }
@@ -1313,7 +1333,7 @@ final class Renderer {
         if (paused) {
             fill.setColor(col(p.accent));
             c.drawCircle(x, y, 16f * s, fill);
-            stroke.setColor(col(p.onAccent));
+            stroke.setColor(col(p.onAccentText));
         } else {
             stroke.setColor(col(p.dim));
         }
@@ -1332,14 +1352,38 @@ final class Renderer {
         if (s == null || s.length() == 0) return;
         text.getFontMetrics(fm);
         float half = -(fm.ascent + fm.descent) / 2f;
-        if (text.measureText(s) <= maxW || lineH > 1e5f) {
-            if (lineH > 1e5f) {
-                fitLine(c, s, cx, midY + half, maxW);     // single line, shrunk to fit
-                return;
-            }
-            c.drawText(s, cx, midY + half, text);
+        if (lineH > 1e5f) {
+            fitLine(c, s, cx, midY + half, maxW);     // single line, shrunk to fit
             return;
         }
+        Wrap k = wrap(s, maxW);
+        if (k.one) {
+            c.drawText(s, cx, midY + half, text);
+        } else if (k.first == null) {
+            fitLine(c, s, cx, midY + half, maxW);
+        } else {
+            c.drawText(k.first, cx, midY - lineH / 2f + half, text);
+            fitLine(c, k.second, cx, midY + lineH / 2f + half, maxW);
+        }
+    }
+
+    /** Where {@code s} breaks at the paint's current font and size; remembered, since text rarely changes between frames. */
+    private Wrap wrap(String s, float maxW) {
+        Typeface tf = text.getTypeface();
+        float size = text.getTextSize();
+        for (Wrap k : wraps) {
+            if (k != null && k.maxW == maxW && k.size == size && k.tf == tf && (k.src == s || k.src.equals(s))) return k;
+        }
+        Wrap k = wraps[wrapNext];
+        if (k == null) k = wraps[wrapNext] = new Wrap();
+        wrapNext = (wrapNext + 1) % wraps.length;
+        k.src = s;
+        k.maxW = maxW;
+        k.size = size;
+        k.tf = tf;
+        k.first = k.second = null;
+        k.one = text.measureText(s) <= maxW;
+        if (k.one) return k;
         int cut = -1;
         for (int i = s.indexOf(' '); i > 0; i = s.indexOf(' ', i + 1)) {
             if (text.measureText(s, 0, i) <= maxW) cut = i;
@@ -1352,12 +1396,11 @@ final class Renderer {
                 break;
             }
         }
-        if (cut < 0) {
-            fitLine(c, s, cx, midY + half, maxW);
-            return;
+        if (cut >= 0) {
+            k.first = s.substring(0, cut);
+            k.second = s.substring(cut + 1);
         }
-        c.drawText(s.substring(0, cut), cx, midY - lineH / 2f + half, text);
-        fitLine(c, s.substring(cut + 1), cx, midY + lineH / 2f + half, maxW);
+        return k;
     }
 
     private void fitLine(Canvas c, String s, float cx, float base, float maxW) {

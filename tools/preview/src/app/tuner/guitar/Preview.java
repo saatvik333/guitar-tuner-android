@@ -126,7 +126,7 @@ public final class Preview {
         u.focusId = Renderer.H_TUNING_NEXT;
         shot(r, u, out + "/k2_focus_tuning.png");
 
-        u = sized("Aurum", "Standard", 914, 412, 2.625f, 1f, 24, 24);
+        u = sides(sized("Aurum", "Standard", 914, 412, 2.625f, 1f, 24, 0), 32, 48);   // cutout left, buttons right
         live(u, 'D', 0, "3", 4.6f, "String 4", "Tune down", "147.22 Hz");
         u.sTargetT[2] = 1f; u.sTunedT[0] = 1f; u.sTunedT[1] = 1f;
         shot(r, u, out + "/l1_landscape.png");
@@ -136,61 +136,57 @@ public final class Preview {
         u.caption = "Listening"; u.hint = "Play a string";
         shot(r, u, out + "/g0_entry.png");
 
-        u = guide(phone("Aurum", "Standard"), 0, "", "Listening");
+        u = guide(phone("Aurum", "Standard"), 0, Guide.WAIT, 0);
         u.gPluckT = 0.55f;
         shot(r, u, out + "/g1_wait_pluck.png");
 
-        u = guide(phone("Celeste", "Standard"), 0, "Tighten", "Much too low. Turn the peg slowly, plucking as you go.");
+        u = guide(phone("Celeste", "Standard"), 0, Guide.TIGHTEN, Guide.FAR);
         reading(u, -180f, 0.37f);
         shot(r, u, out + "/g2_tighten_far.png");
 
-        u = guide(phone("Rosa", "Standard"), 2, "Loosen", "Nearly there. Just a touch looser.");
+        u = guide(phone("Rosa", "Standard"), 2, Guide.LOOSEN, Guide.NEAR);
         u.sTunedT[0] = 1f; u.sTunedT[1] = 1f;
         reading(u, 9f, 0.81f);
         shot(r, u, out + "/g3_loosen_near.png");
 
-        u = guide(phone("Salvia", "Standard"), 3, "Tuned", "");
-        u.gWordAccent = true; u.sTunedT[0] = 1f; u.sTunedT[1] = 1f; u.sTunedT[2] = 1f; u.sTunedT[3] = 0.7f;
+        u = guide(phone("Salvia", "Standard"), 3, Guide.TUNED, 0);
+        u.sTunedT[0] = 1f; u.sTunedT[1] = 1f; u.sTunedT[2] = 1f; u.sTunedT[3] = 0.7f;
         reading(u, 0.6f, 0.2f);
         u.tuneT = 1f; u.pulseT = 0.3f; u.gChevT = 0f;
         shot(r, u, out + "/g4_tuned.png");
 
-        u = guide(phone("Ambra", "Standard"), 4, "Other way", "The note is moving away. Turn the peg the other way.");
+        u = guide(phone("Ambra", "Standard"), 4, Guide.WRONG_WAY, 0);
         for (int i = 0; i < 4; i++) u.sTunedT[i] = 1f;
         reading(u, -64f, 1.1f);
         u.gShakeT = 0.15f;
         shot(r, u, out + "/g5_other_way.png");
 
-        u = guide(phone("Notte", "Standard"), 5, "", "Listening");
+        u = guide(phone("Notte", "Standard"), 5, Guide.DONE, 0);
         for (int i = 0; i < 6; i++) u.sTunedT[i] = 1f;
-        u.guideDone = true; u.gDoneT = 1f;
-        u.gTitle = "All strings tuned"; u.gCaption = "Standard tuning";
-        u.gSub = "Tuning one string pulls on the others a little. Go round once more to check.";
-        u.gWord = ""; u.gDetail = "";
         shot(r, u, out + "/g6_done.png");
 
-        u = guide(phone("Salvia", "Standard"), 0, "", "");
+        u = guide(phone("Salvia", "Standard"), 0, Guide.WAIT, 0);
         u.message = "Microphone access needed"; u.messageAction = "Allow";
         shot(r, u, out + "/g7_permission.png");
 
-        u = guide(sized("Aurum", "Standard", 914, 412, 2.625f, 1f, 24, 24), 1, "Tighten", "Too low. Keep turning slowly.");
+        u = guide(sides(sized("Aurum", "Standard", 914, 412, 2.625f, 1f, 24, 24), 32, 0), 1, Guide.TIGHTEN, Guide.OFF);
         u.sTunedT[0] = 1f;
         reading(u, -42f, 0.5f);
         shot(r, u, out + "/g8_landscape.png");
 
-        u = guide(sized("Celeste", "Standard", 360, 370, 2.625f, 1f, 24, 0), 1, "Tighten", "Too low. Keep turning slowly.");
+        u = guide(sized("Celeste", "Standard", 360, 370, 2.625f, 1f, 24, 0), 1, Guide.TIGHTEN, Guide.OFF);
         reading(u, -42f, 0.5f);
         shot(r, u, out + "/g9_split.png");
 
-        u = guide(sized("Rosa", "Standard", 320, 569, 2f, 1.3f, 24, 48), 2, "Loosen", "Too high. Go a little below, then tighten up to it.");
+        u = guide(sized("Rosa", "Standard", 320, 569, 2f, 1.3f, 24, 48), 2, Guide.LOOSEN, Guide.OFF);
         reading(u, 35f, 0.5f);
         shot(r, u, out + "/g10_narrow.png");
 
-        u = guide(phone("Celeste", "Ukulele"), 0, "Almost", "Right there. Let it ring.");
+        u = guide(phone("Celeste", "Ukulele"), 0, Guide.ALMOST, 0);
         reading(u, 1.5f, 0.5f);
         shot(r, u, out + "/g11_ukulele.png");
 
-        u = guide(phone("Notte", "Standard"), 1, "", "Listening");
+        u = guide(phone("Notte", "Standard"), 1, Guide.WAIT, 0);
         u.sTunedT[0] = 1f;
         u.gPluckT = 0.86f;
         shot(r, u, out + "/g12_pluck_release.png");
@@ -224,57 +220,91 @@ public final class Preview {
         u.hintAccent = true; u.sLockT[0] = 1f; u.sTargetT[0] = 1f; u.readPill = "Switch to string 5";
         shot(r, u, out + "/m5_wrong_string.png");
 
-        u = guide(phone("Ambra", "Standard"), 2, "Tuned", "Tap Next for the next string.");
-        u.gAuto = false; u.gWordAccent = true; u.sTunedT[0] = 1f; u.sTunedT[1] = 1f; u.sTunedT[2] = 1f;
+        u = phone("Ambra", "Standard");
+        u.gAuto = false;
+        guide(u, 2, Guide.TUNED, 0);
+        u.sTunedT[0] = 1f; u.sTunedT[1] = 1f; u.sTunedT[2] = 1f;
         reading(u, 0.5f, 0.3f);
         u.tuneT = 1f; u.gChevT = 0f;
         shot(r, u, out + "/g13_manual_tuned.png");
 
-        u = guide(phone("Celeste", "Standard"), 0, "One string", "That was several strings at once. Pluck only the top string.");
+        u = guide(phone("Celeste", "Standard"), 2, Guide.STRUM, 0);
+        u.sTunedT[0] = 1f; u.sTunedT[1] = 1f;
         shot(r, u, out + "/g14_strum.png");
 
-        u = guide(phone("Aurum", "Standard"), 3, "", "Not hearing it yet. Hold the phone near the guitar and pluck firmly.");
+        u = guide(phone("Aurum", "Standard"), 3, Guide.UNHEARD, 0);
         u.gPluckT = 0.4f; u.sTunedT[0] = 1f; u.sTunedT[1] = 1f; u.sTunedT[2] = 1f;
         shot(r, u, out + "/g15_unheard.png");
 
-        u = guide(phone("Salvia", "Standard"), 0, "Wrong string?", "That sounds like the second string from the top. Pluck the top string, or tap that one.");
+        u = phone("Salvia", "Standard");
         u.gAuto = false;
+        guide(u, 0, Guide.WRONG_STRING, 1);
         reading(u, 500f, 0.2f);
+        u.gChevT = 0f;                                   // no direction to turn: the app shows none
         shot(r, u, out + "/g16_wrong_string.png");
+
+        // the longest reason the guide gives, in the narrow window at the largest font scale
+        int[] lw = longest(Tuning.ALL[Tuning.indexOf("Standard")]);
+        u = guide(sized("Rosa", "Standard", 320, 569, 2f, 1.3f, 24, 48), lw[2], lw[0], lw[1]);
+        shot(r, u, out + "/g17_longest_narrow.png");
+
+        u = guide(phone("Notte", "Standard"), 5, Guide.LOOSEN, Guide.FAR);
+        reading(u, 260f, 0.4f);
+        shot(r, u, out + "/g18_far_too_high.png");
+
+        u = guide(sized("Aurum", "Standard", 360, 370, 2.625f, 1f, 24, 0), 1, Guide.TOO_HIGH, 0);
+        reading(u, 1000f, 0.4f);
+        u.gChevT = 0f;
+        shot(r, u, out + "/g19_too_high_split.png");
 
         if (args.length > 2) motion(r, args[2]);
     }
 
-    static final String[] TITLES = {"Top string", "Second from the top", "Third from the top", "Fourth from the top",
-            "Fifth from the top", "Bottom string"};
-    static final String[] SUBS = {"The thickest one, nearest your face. Its note is E.", "Pluck it and let it ring. Its note is A.",
-            "Pluck it and let it ring. Its note is D.", "Pluck it and let it ring. Its note is G.",
-            "Pluck it and let it ring. Its note is B.", "The thinnest one, nearest the floor. Its note is E."};
-
-    static Ui guide(Ui u, int step, String word, String detail) {
+    /** The guided page at {@code step} of the Ui's tuning, saying what the app says for {@code status}. */
+    static Ui guide(Ui u, int step, int status, int arg) {
         Tuning t = Tuning.ALL[Tuning.indexOf(u.tuningName)];
         int n = t.count(), lo = 999, hi = -999;
         for (int m : t.strings) { lo = Math.min(lo, m); hi = Math.max(hi, m); }
         for (int i = 0; i < n; i++) u.gThick[i] = (hi - t.strings[i]) / (float) (hi - lo);
+        boolean done = status == Guide.DONE;
+        int tuned = done ? (1 << n) - 1 : 0;                // the summary after a full round
         u.guideT = 1f;
+        u.guideDone = done;
+        u.gDoneT = done ? 1f : 0f;
         u.gStep = step;
         u.gCursor = step;
-        u.gCaption = "Step " + (step + 1) + " of " + n + " · " + t.name;
-        if (n == 6) {
-            u.gTitle = TITLES[step];
-            u.gSub = SUBS[step];
-        } else {
-            u.gTitle = step == 0 ? "Top string" : "Second from the top";
-            u.gSub = "The one nearest your face. Its note is G.";
-        }
-        u.gWord = word;
-        u.gDetail = detail;
+        u.gCaption = Guide.caption(t, step, done);
+        u.gTitle = Guide.title(t, step, done, tuned);
+        u.gSub = Guide.sub(t, step, done, tuned, t.flats(false));
+        u.gWord = Guide.word(status);
+        u.gDetail = Guide.detail(status, arg, t, step, u.gAuto);
+        u.gWordAccent = status == Guide.TUNED;
         return u;
+    }
+
+    /** {status, arg, step} of the longest reason the guide gives on {@code t}: the first to wrap. */
+    static int[] longest(Tuning t) {
+        int[] best = null;
+        int bestLen = -1;
+        for (int step = 0; step < t.count(); step++) {
+            for (int st = 0; st <= Guide.TOO_HIGH; st++) {                 // TOO_HIGH is the last status
+                int args = st == Guide.WRONG_STRING ? t.count() : Guide.STALE + Guide.HIGH + 1;
+                for (int a = 0; a < args; a++) {
+                    if (st == Guide.WRONG_STRING && a == step) continue;
+                    int len = Guide.detail(st, a, t, step, false).length();
+                    if (len > bestLen) {
+                        bestLen = len;
+                        best = new int[]{st, a, step};
+                    }
+                }
+            }
+        }
+        return best;
     }
 
     static void reading(Ui u, float cents, float time) {
         u.noteT = 1f; u.liveT = 1f;
-        u.bead = (float) Math.tanh(cents / 90.0);
+        u.bead = Renderer.guideBeadOf(cents);
         u.gVib = 1f;
         u.gSag = Math.max(0f, Math.min(1f, -cents / 150f));
         u.gChevT = Math.abs(cents) > 3f ? 1f : 0f;
@@ -290,9 +320,14 @@ public final class Preview {
         int fps = 30;
         double total = 9.6;
         int frames = (int) (total * fps);
-        Ui u = guide(sized("Aurum", "Standard", 412, 914, 1.5f, 1f, 32, 24), 0, "", "Listening");
+        Ui u = guide(sized("Aurum", "Standard", 412, 914, 1.5f, 1f, 32, 24), 0, Guide.WAIT, 0);
+        Tuning std = Tuning.ALL[Tuning.indexOf(u.tuningName)];
+        Tracker tr = new Tracker();                          // the guide's words follow its readings
+        tr.tuning = std;
+        tr.tolerance = 3.0;
+        Guide g = new Guide();
         float bead = 0f, beadV = 0f, vib = 0f, sag = 0f, chev = 0f, noteT = 0f, tuneT = 0f, cursor = 0f, tuned1 = 0f;
-        String word = "", detail = "Listening";
+        String word = u.gWord, detail = u.gDetail;
         float wordT = 1f, titleT = 1f;
         int step = 0;
         float dt = 1f / fps;
@@ -309,22 +344,18 @@ public final class Preview {
             if (t >= 7.5f && step == 0) {
                 step = 1;
                 u.gTitlePrev = u.gTitle; u.gSubPrev = u.gSub;
-                u.gTitle = TITLES[1]; u.gSub = SUBS[1];
-                u.gCaption = "Step 2 of 6 · Standard";
+                u.gTitle = Guide.title(std, 1, false, 1); u.gSub = Guide.sub(std, 1, false, 1, false);
+                u.gCaption = Guide.caption(std, 1, false);
                 titleT = 0f;
             }
-            String w, d;
-            boolean accent = false;
-            if (waiting || step == 1) { w = ""; d = "Listening"; }
-            else if (tunedNow) { w = "Tuned"; d = ""; accent = true; }
-            else if (cents < -100) { w = "Tighten"; d = "Much too low. Turn the peg slowly, plucking as you go."; }
-            else if (cents < -15) { w = "Tighten"; d = "Too low. Keep turning slowly."; }
-            else if (cents < -3) { w = "Tighten"; d = "Nearly there. Just a touch more."; }
-            else { w = "Almost"; d = "Right there. Let it ring."; }
+            tr.hasNote = tr.live = live && step == 0;
+            tr.cents = Float.isNaN(cents) ? 0.0 : cents;
+            g.update(tr, step, false, false, false, tunedNow, false, false, false);
+            String w = Guide.word(g.status), d = Guide.detail(g.status, g.arg, std, step, true);
             if (!w.equals(word) || !d.equals(detail)) {
                 u.gWordPrev = word; u.gDetailPrev = detail; word = w; detail = d; wordT = 0f;
             }
-            u.gWord = word; u.gDetail = detail; u.gWordAccent = accent;
+            u.gWord = word; u.gDetail = detail; u.gWordAccent = g.status == Guide.TUNED;
             wordT = Math.min(1f, wordT + dt / 0.25f);
             titleT = Math.min(1f, titleT + dt / 0.35f);
             u.gWordT = wordT; u.gTitleT = titleT;
@@ -332,7 +363,7 @@ public final class Preview {
             boolean hasNote = live || tunedNow;
             noteT = approach(noteT, hasNote && step == 0 ? 1f : 0f, dt, 0.12f);
             tuneT = approach(tuneT, tunedNow ? 1f : 0f, dt, 0.07f);
-            float target = Float.isNaN(cents) ? 0f : (float) Math.tanh(cents / 90.0);
+            float target = Float.isNaN(cents) ? 0f : Renderer.guideBeadOf(cents);
             for (float q = 0; q < dt; q += 0.004f) {
                 float h = Math.min(0.004f, dt - q);
                 float acc = 18f * 18f * (target - bead) - 2f * 0.82f * 18f * beadV;
@@ -402,6 +433,13 @@ public final class Preview {
             u.sLetter[i] = Tuning.letter(t.strings[i], flats);
             u.sAcc[i] = Tuning.accidental(t.strings[i], flats);
         }
+        return u;
+    }
+
+    /** Side insets in dp: a camera cutout, or the navigation bar on the side in landscape. */
+    static Ui sides(Ui u, int leftDp, int rightDp) {
+        u.insetL = Math.round(leftDp * u.dp);
+        u.insetR = Math.round(rightDp * u.dp);
         return u;
     }
 

@@ -2,6 +2,9 @@ package android.graphics;
 import java.awt.Font;
 import java.awt.font.FontRenderContext;
 import java.awt.font.LineMetrics;
+import java.awt.font.TextAttribute;
+import java.util.HashMap;
+import java.util.Map;
 public class Paint {
     public static final int ANTI_ALIAS_FLAG = 1;
     public enum Style { FILL, STROKE, FILL_AND_STROKE }
@@ -23,9 +26,24 @@ public class Paint {
     public float getStrokeWidth() { return strokeWidth; }
     public void setColor(int c) { color = c; }
     public void setTypeface(Typeface t) { tf = t; }
+    public Typeface getTypeface() { return tf; }
     public void setTextSize(float s) { textSize = s; }
     public float getTextSize() { return textSize; }
-    public Font font() { Font base = tf != null ? tf.font : new Font("SansSerif", Font.PLAIN, 1); return base.deriveFont(textSize); }
+    /** Kerning and ligatures on, as Android's default font features; derived once per face and size. */
+    public Font font() {
+        if (cached == null || cachedTf != tf || cachedSize != textSize) {
+            Font base = tf != null ? tf.font : new Font("SansSerif", Font.PLAIN, 1);
+            Map<TextAttribute, Object> attrs = new HashMap<>();
+            attrs.put(TextAttribute.SIZE, textSize);
+            attrs.put(TextAttribute.KERNING, TextAttribute.KERNING_ON);
+            attrs.put(TextAttribute.LIGATURES, TextAttribute.LIGATURES_ON);
+            cached = base.deriveFont(attrs);
+            cachedTf = tf;
+            cachedSize = textSize;
+        }
+        return cached;
+    }
+    private Font cached; private Typeface cachedTf; private float cachedSize;
     public float measureText(String s) { return s.isEmpty() ? 0f : (float) font().getStringBounds(s, FRC).getWidth(); }
     public float measureText(String s, int start, int end) { return measureText(s.substring(start, end)); }
     public float getFontMetrics(FontMetrics fm) {

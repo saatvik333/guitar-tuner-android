@@ -5,15 +5,29 @@ final class Tuning {
     static final int SPELL_SETTING = 0, SPELL_SHARPS = 1, SPELL_FLATS = 2;
 
     final String name;
-    /** Open strings as MIDI note numbers, lowest-sounding first in display order; null = chromatic. */
+    /**
+     * Open strings as MIDI note numbers in physical order, from the string nearest the player's
+     * face: lowest-sounding first, except the re-entrant G of the ukulele. Null = chromatic.
+     */
     final int[] strings;
     /** How the open strings are spelled: the user's setting, or fixed by the tuning's key. */
     final int spell;
+    /** The open strings sound a major chord (Open G, D, E, C). */
+    final boolean openChord;
 
     Tuning(String name, int spell, int... strings) {
+        this(name, spell, false, strings);
+    }
+
+    private Tuning(String name, int spell, boolean openChord, int[] strings) {
         this.name = name;
         this.spell = spell;
+        this.openChord = openChord;
         this.strings = strings.length == 0 ? null : strings;
+    }
+
+    private static Tuning open(String name, int... strings) {
+        return new Tuning(name, SPELL_SHARPS, true, strings);
     }
 
     boolean chromatic() {
@@ -24,7 +38,7 @@ final class Tuning {
         return strings == null ? 0 : strings.length;
     }
 
-    /** Conventional string number: the highest-sounding string is 1. */
+    /** Conventional string number: the string farthest from the player's face is 1. */
     int stringNumber(int idx) {
         return strings.length - idx;
     }
@@ -42,10 +56,10 @@ final class Tuning {
         new Tuning("Full step down", SPELL_SHARPS, 38, 43, 48, 53, 57, 62),
         new Tuning("Drop C",         SPELL_SHARPS, 36, 43, 48, 53, 57, 62),
         new Tuning("DADGAD",         SPELL_SHARPS, 38, 45, 50, 55, 57, 62),
-        new Tuning("Open G",         SPELL_SHARPS, 38, 43, 50, 55, 59, 62),
-        new Tuning("Open D",         SPELL_SHARPS, 38, 45, 50, 54, 57, 62),
-        new Tuning("Open E",         SPELL_SHARPS, 40, 47, 52, 56, 59, 64),
-        new Tuning("Open C",         SPELL_SHARPS, 36, 43, 48, 55, 60, 64),
+        open("Open G",                             38, 43, 50, 55, 59, 62),
+        open("Open D",                             38, 45, 50, 54, 57, 62),
+        open("Open E",                             40, 47, 52, 56, 59, 64),
+        open("Open C",                             36, 43, 48, 55, 60, 64),
         new Tuning("7-string",       SPELL_SHARPS, 35, 40, 45, 50, 55, 59, 64),
         new Tuning("Bass",           SPELL_SHARPS, 28, 33, 38, 43),
         new Tuning("Ukulele",        SPELL_SHARPS, 67, 60, 64, 69),

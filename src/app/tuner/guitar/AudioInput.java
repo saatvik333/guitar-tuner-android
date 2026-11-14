@@ -56,10 +56,6 @@ final class AudioInput {
         this.sink = sink;
     }
 
-    boolean active() {
-        return current != null;
-    }
-
     boolean isCurrent(int session) {
         return current != null && current.id == session;
     }
@@ -87,7 +83,8 @@ final class AudioInput {
         s.run = false;
         Thread t = last;
         if (t == null) return;
-        t.interrupt();
+        // No interrupt: a thread still waiting for its predecessor must keep joining it, or a
+        // later session could open the microphone while the predecessor still holds it.
         try {
             t.join(800);
         } catch (InterruptedException e) {
@@ -100,12 +97,16 @@ final class AudioInput {
             try {
                 prev.join(3000);
             } catch (InterruptedException e) {
-                return;                                    // stopped while waiting
+                return;                                    // nothing interrupts capture threads; end if it happens
             }
         }
         if (!s.run) return;
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
         AudioRecord rec = open();
+        if (rec != null && !s.run) {                       // stopped while the (possibly slow) open ran
+            rec.release();
+            return;
+        }
         if (rec == null) {
             if (s.run) sink.onFailure(s.id);
             return;

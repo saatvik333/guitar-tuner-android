@@ -6,13 +6,30 @@ package app.tuner.guitar;
  * accent (the one saturated colour: bead, active states), onAccent (glyphs on accent).
  */
 final class Palette {
+    /** Opacity of the chevrons that march toward the target; accentStroke is derived to survive it. */
+    static final float CHEVRON_ALPHA = 0.85f;
+    /** Opacity of the accent wash behind the guide's current string; accentText is derived to read on it. */
+    static final float ROW_TINT = 0.10f;
+
+    private static final int INK = 0xFF000000, PAPER = 0xFFFFFFFF;
+
     final String name;
     final boolean dark;
     final int bg, fg, dim, line, accent, onAccent;
-    /** Derived for text, WCAG AA (4.5:1): accent as text on bg, and text on an accent fill. */
-    final int accentText, onAccentText;
+    /**
+     * Derived, WCAG AA: accentText is the accent as text, 4.5:1 on bg and on the guide row's tint;
+     * onAccentText is text or a glyph on an accent fill, 4.5:1; accentStroke is the accent as a
+     * ring or chevron, 3:1 on bg (also at CHEVRON_ALPHA).
+     */
+    final int accentText, onAccentText, accentStroke;
 
     Palette(String name, boolean dark, int bg, int fg, int dim, int line, int accent, int onAccent) {
+        this(name, dark, bg, fg, dim, line, accent, onAccent,
+                accentText(bg, fg, accent), onAccentText(onAccent, accent), accentStroke(bg, fg, accent));
+    }
+
+    private Palette(String name, boolean dark, int bg, int fg, int dim, int line, int accent, int onAccent,
+                    int accentText, int onAccentText, int accentStroke) {
         this.name = name;
         this.dark = dark;
         this.bg = bg;
@@ -21,15 +38,31 @@ final class Palette {
         this.line = line;
         this.accent = accent;
         this.onAccent = onAccent;
+        this.accentText = accentText;
+        this.onAccentText = onAccentText;
+        this.accentStroke = accentStroke;
+    }
+
+    private static int accentText(int bg, int fg, int accent) {
+        int tint = mix(bg, accent, ROW_TINT);
         int at = accent;
-        for (int i = 1; i <= 50 && contrast(at, bg) < 4.5; i++) at = mix(accent, fg, i / 50f);
-        accentText = at;
-        if (contrast(onAccent, accent) >= 4.5) {
-            onAccentText = onAccent;
-        } else {
-            int ink = 0xFF1A1A1A, paper = 0xFFFFFFFF;
-            onAccentText = contrast(ink, accent) >= contrast(paper, accent) ? ink : paper;
+        for (int i = 1; i <= 50 && (contrast(at, bg) < 4.5 || contrast(at, tint) < 4.5); i++) {
+            at = mix(accent, fg, i / 50f);
         }
+        return at;
+    }
+
+    private static int accentStroke(int bg, int fg, int accent) {
+        int at = accent;
+        for (int i = 1; i <= 50 && contrast(mix(bg, at, CHEVRON_ALPHA), bg) < 3.0; i++) {
+            at = mix(accent, fg, i / 50f);
+        }
+        return at;
+    }
+
+    private static int onAccentText(int onAccent, int accent) {
+        if (contrast(onAccent, accent) >= 4.5) return onAccent;
+        return contrast(INK, accent) >= contrast(PAPER, accent) ? INK : PAPER;
     }
 
     static final Palette[] BUILT_IN = {
@@ -41,12 +74,15 @@ final class Palette {
         new Palette("Notte",   true,  0xFF000000, 0xFFE6E6E6, 0xFF8A8A8A, 0xFF262626, 0xFFE6E6E6, 0xFF000000),
     };
 
+    /** In-between palette for the theme animation: mixes the tokens, derived ones included, per frame. */
     static Palette lerp(Palette a, Palette b, float t) {
         if (t <= 0f) return a;
         if (t >= 1f) return b;
         return new Palette(b.name, t < 0.5f ? a.dark : b.dark,
                 mix(a.bg, b.bg, t), mix(a.fg, b.fg, t), mix(a.dim, b.dim, t),
-                mix(a.line, b.line, t), mix(a.accent, b.accent, t), mix(a.onAccent, b.onAccent, t));
+                mix(a.line, b.line, t), mix(a.accent, b.accent, t), mix(a.onAccent, b.onAccent, t),
+                mix(a.accentText, b.accentText, t), mix(a.onAccentText, b.onAccentText, t),
+                mix(a.accentStroke, b.accentStroke, t));
     }
 
     static int mix(int c1, int c2, float t) {

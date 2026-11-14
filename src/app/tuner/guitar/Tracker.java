@@ -74,7 +74,6 @@ final class Tracker {
 
     /** {@code onset}: the detector heard a pluck in this frame. */
     void update(double t, boolean voiced, double f, boolean onset) {
-        if (t < lastT - 1.0) lastOnset = -1e9;              // a new capture session: time restarted
         double dt = Math.min(0.1, Math.max(0.001, t - lastT));
         lastT = t;
         now = t;

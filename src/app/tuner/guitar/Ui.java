@@ -14,7 +14,7 @@ final class Ui {
     float pageT;                 // 0 = tuner, 1 = settings
 
     // dial
-    float bead;                  // needle position, tanh(cents / 58): -1 flat .. +1 sharp
+    float bead;                  // needle position -1 flat .. +1 sharp: Renderer.beadOf on the dial, guideBeadOf on the guide
     float noteT;                 // 1 = a note is shown
     float liveT;                 // 1 = pitch is being heard now, 0 = last reading held
     float tuneT;                 // in-tune highlight

@@ -6,15 +6,21 @@ the header or by swiping sideways.
 
 ## Build
 
-Gradle-free. Debian/Ubuntu toolchain:
+Gradle-free. Needs a JDK, `zip`, python3 with PIL, and two Android SDK packages:
 
-    sudo apt install android-sdk-platform-23 aapt dalvik-exchange zipalign apksigner python3-pil
-    KEYSTORE_PASS=... ./build.sh                   # -> build/Tuner.apk (v1+v2+v3, minSdk 23, targetSdk 36)
+    sdkmanager "platforms;android-36" "build-tools;36.0.0"
+    KEYSTORE_PASS=... ./build.sh                   # -> build/Tuner.apk (v1+v2+v3, minSdk 23, compile/targetSdk 36)
     KEYSTORE_PASS=... NEW_KEYSTORE=1 ./build.sh    # first build only: creates keystore/tuner.jks
 
-Every build that should install over an earlier one must be signed with the same key, so back the
-keystore up. `VERSION_CODE` / `VERSION_NAME` override the version. Google Play needs an .aab,
-which this script does not produce yet (needs `bundletool`).
+The SDK is found through `ANDROID_SDK_ROOT`, `ANDROID_HOME` or `ANDROID_SDK` (`/usr/lib/android-sdk`
+if none is set); `BUILD_TOOLS` and `PLATFORM_JAR` override the newest build-tools and the API 36
+jar. Every build that should install over an earlier one must be signed with the same key, so back
+the keystore up. The version comes from `VERSION` (code = major x 10000 + minor x 100 + patch);
+`VERSION_CODE` / `VERSION_NAME` override it. Google Play needs an .aab, which this script does not
+produce yet (needs `bundletool`).
+
+Backup carries the settings but not `device` prefs (whether the microphone was refused), which
+describe this phone only.
 
 ## Layout
 
@@ -22,17 +28,24 @@ which this script does not produce yet (needs `bundletool`).
       PitchEngine.java   streaming pitch detection (no Android deps)
       Tracker.java       target note/string, smoothing, in-tune state (no Android deps)
       Tuning.java        tunings, note math
+      Guide.java         what the guided page says: status and wording (no Android deps)
       Renderer.java      all drawing, android.graphics only
       TunerView.java     animation, input, haptics, accessibility; drains pitch frames on the UI thread
       AudioInput.java    AudioRecord capture thread
-      ToneSynth.java     reference tone
+      ToneSynth.java     reference tone (holds ducking audio focus while it plays)
       MainActivity.java  permission, lifecycle, window/insets, Material You palette on 12+
-      Palette.java       theme tokens: bg, fg, dim, line, accent, onAccent (shared with Level)
-    tools/preview/       AWT-backed android.graphics stubs: renders Renderer on the JVM; EngineTest
+      Palette.java       theme tokens: bg, fg, dim, line, accent, onAccent, plus derived accentText
+                         (4.5:1 on bg and the guide's row tint), accentStroke (3:1) and onAccentText
+    tools/preview/       AWT-backed android.graphics stubs: renders Renderer on the JVM; EngineTest, GuideTest
 
-    javac -d /tmp/pv $(find tools/preview -name '*.java') src/app/tuner/guitar/{Palette,Ui,Renderer,Tuning,PitchEngine,Tracker}.java
+    javac -d /tmp/pv $(find tools/preview -name '*.java') src/app/tuner/guitar/{Palette,Ui,Renderer,Tuning,PitchEngine,Tracker,StrumAnalyzer,Guide}.java
     java -cp /tmp/pv app.tuner.guitar.EngineTest
+    java -cp /tmp/pv app.tuner.guitar.GuideTest
     java -Djava.awt.headless=true -cp /tmp/pv app.tuner.guitar.Preview assets/fonts /tmp/shots
+
+Capture runs from start to stop, so a visible split-screen pane keeps listening without focus.
+Rotation, dark mode, font size or process death restore the tab, settings page, pause, tuned
+marks, guide step, string lock and tuning.
 
 ## Pitch detection
 
@@ -63,8 +76,10 @@ Per hop (1024 samples at 48 kHz, ~47 readings/s) over a 4096-sample window:
    the selected tuning's lowest string) is not one string. Several strings are not periodic but
    their spectrum is all peaks (flatness under 0.14); claps, rustle and the consonants of speech
    are not periodic either but flat (0.2 - 0.6) and never count. When the hops after a pluck are
-   mostly unpitched-but-tonal, no pitch is reported and up to 0.75 s of audio from 150 ms after
-   the pluck (0.51 s at 16 kHz) goes to `StrumAnalyzer`.
+   mostly unpitched-but-tonal (a fast strum), periodic at first and then not (a slow strum), or
+   flicker as chord-like within ~0.5 s of the pluck (notes sharing a period, D A D G A D), no
+   pitch is reported and up to 0.75 s of audio from 150 ms after the pluck (0.51 s at 16 kHz)
+   goes to `StrumAnalyzer`.
 9. Gate: level above an adaptive noise floor plus clarity with hysteresis. Windows containing
    digital silence never update the floor (otherwise capture start or a system mute would leave
    the gate open for minutes); 1.5 s of it (capture muted, or another app holds the microphone)
@@ -73,18 +88,21 @@ Per hop (1024 samples at 48 kHz, ~47 readings/s) over a 4096-sample window:
 The capture source is VOICE_RECOGNITION: the Android CDD requires it to run without noise
 suppression or AGC and flat from 100 Hz to 4 kHz.
 
-Measured by `EngineTest` (16-bit, dithered):
+Measured by `EngineTest` (16-bit, dithered; asserted bound in brackets, so a regression fails):
 
-- Pure and harmonic tones E1..C6: worst error 0.006 cents.
+- Pure and harmonic tones E1..C6: worst error 0.006 cents [0.012], 90% of frames voiced or more.
 - Plucked strings through a phone-microphone model (fundamental at -11 dB, 30 dB SNR, attack
-  glide, noise burst): median error under 0.1 cents, no octave errors, E1 to G4.
+  glide, noise burst): median error under 0.1 cents [0.17], no octave errors, E1 to G4.
 - Missing fundamental (E2, A2): correct octave.
-- First note 12-55 ms after the pluck, within 1 cent by ~200 ms.
-- 44.1, 22.05 and 16 kHz capture: worst error 0.02 cents.
+- First note 33-55 ms after the pluck [110 ms], within 1 cent by ~200 ms [350 ms].
+- 44.1, 22.05 and 16 kHz capture: worst error 0.023 cents [0.05].
 - A string plucked while another rings (all adjacent pairs, low E under high E and back): the new
-  string, within 2 cents of its reading alone (mostly within 0.5).
+  string, within 1.1 cents of its reading alone [2].
 - Open fifths, fourths and octaves ringing together (Drop D and DADGAD pairs, D2 + A3 included):
-  never taken for a chord, the new string within 1 cent of its reading alone.
+  never taken for a chord, the new string within 0.8 cents of its reading alone [1.6].
+- Analysis: about 1 ms per hop on a desktop JVM [under the hop's 21.3 ms].
+- Known limit: on Bass, a string plucked while another rings reads as several notes (an 85 ms
+  window holds too few cycles of 41-98 Hz).
 
 ## Strum check (`StrumAnalyzer`)
 
@@ -155,19 +173,19 @@ For someone tuning for the first time.
 - On reaching pitch: haptic, a check drawn in the target, and after 1.1 s the next untuned
   string; the previous string's ringing is ignored for up to 3 s. At the end: "Check again".
 - Battery: as the home screen it draws only while something moves. The demonstration pluck plays
-  three times (8.4 s), then rests until the step changes or the next sound has died away.
+  three times (8.4 s), then rests until the step changes or the next sound has died away. While
+  settings covers the tabs, their motion and incoming readings draw nothing.
 - Motion: a demonstration pluck loops on the highlighted string while waiting (pick comes down,
   pushes the string, slips off, the string rings, a ripple leaves it); the string vibrates while
   it sounds and sags while it is far too slack, straightening as it is tightened; chevrons march
   from the bead toward the target, faster when further off; "Other way" shakes; titles and words
   slide and crossfade between steps; checks draw themselves.
-- Short windows give things up in a fixed order, so nothing is drawn over anything else (checked
-  at 432 window sizes from 300x220 to 914x920 dp, font scale 1 and 1.3): the strings' diagram
-  becomes a row of circles, then goes (or moves beside the words when the window is wide); the
-  sub-line; the meter's labels and second line of advice; the caption; the advice; the title;
-  last, below ~260 dp, the Skip / Auto row, whose Next / Skip moves to a tap on the meter (also
-  a button for TalkBack and the keyboard then). Checked for overlapping ink, not just layout
-  boxes, over 90,720 renders.
+- Short windows give things up in a fixed order, so nothing is drawn over anything else: the
+  strings' diagram becomes a row of circles, then goes (or moves beside the words when the window
+  is wide); the sub-line; the meter's labels and second line of advice; the caption; the advice;
+  the title; last, below ~260 dp, the Skip / Auto row, whose Next / Skip moves to the meter (a
+  "Next string" / "Skip this string" action for TalkBack and the keyboard). While the height
+  shrinks, nothing given up comes back, except across the 420 dp switch to the tighter header.
 
 `Preview` renders every guide state (`g*.png`); with a third argument it writes a scripted
 9.6 s run as PNG frames for motion review.
@@ -189,13 +207,18 @@ For someone tuning for the first time.
   below and read "in tune". Tap a string to lock to it; locked, a 12th-fret harmonic counts.
 - Changing A4 or the in-tune range clears the tuned marks.
 - Reference tone: eight harmonics so a phone speaker conveys a low E; readings are ignored while
-  it plays and for 350 ms after. Volume keys control media volume.
+  it plays and for 350 ms after. It shows over Paused, ducks other audio while it plays, and ends
+  on silence. Volume keys control media volume.
 - Keep screen on (default on) applies only while listening or playing the tone on the tuner page.
 - Short windows (split screen down to 220 dp): tighter header and bar, dial beside the tuning
   and strings, then the string row and tuning selector drop out before anything overlaps; a
   small dial shows note and cents only, and a microphone message takes the dial's place.
 - Accessibility: every control is a virtual node; the dial is a polite live region reading the
-  note, string and whole cents at most every 1.5 s; reaching pitch is announced. Keyboard and
-  D-pad: arrows move focus spatially, Tab in reading order, Enter or Space activates, Esc backs out.
+  note, string and whole cents at most every 1.5 s; reaching pitch is announced. A microphone
+  message is a readable node (with its action, if any); silence starting and a refused
+  permission are announced. Contrast: text 4.5:1, indicators and focus ring 3:1 in every theme.
+  Text follows the system font scale up to 1.3x; larger settings render at 1.3x so the custom
+  layouts keep fitting. Keyboard and D-pad: arrows move focus spatially, Tab in reading order,
+  Enter or Space activates, Esc backs out.
 
 Rubik is bundled under the SIL Open Font License (assets/fonts/OFL.txt).
