@@ -3,7 +3,7 @@
 Guitar tuner for Android in the Hairline design language it shares with Level (`hairline/`, see
 its DESIGN.md): flat colour, hairlines, single accent, circle motif, centred column, named themes
 chosen in Settings. Package `me.saatvik.tuner`; Android 7.0 (API 24) and later;
-[privacy policy](https://saatvik333.github.io/guitar-tuner-site/privacy).
+[privacy policy](https://saatvik333.github.io/guitar-tuner-android/privacy).
 
 <p>
   <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/1.png" width="13%" alt="Easy, Aurum theme: the top string 35 cents flat, Tighten">
@@ -284,4 +284,9 @@ For someone tuning for the first time.
   fitting. Keyboard and D-pad: arrows move focus spatially, Tab in reading order, Enter or Space
   activates (held on a reference-pitch chevron, it repeats), Esc backs out.
 
-Rubik is bundled under the SIL Open Font License (hairline/assets/fonts/OFL.txt).
+## License
+
+Copyright © 2026 Saatvik Sharma. All rights reserved. The source is published for viewing only; no
+permission is granted to use, copy, modify or distribute it (see [LICENSE](LICENSE)). The bundled
+Rubik font is under the SIL Open Font License (hairline/assets/fonts/OFL.txt), and `hairline/` is
+under its own repository's terms.

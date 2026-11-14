@@ -31,7 +31,7 @@ Upload certificate SHA-256: `E3:1B:D5:4B:0F:97:46:DA:FF:6A:96:5B:47:4A:02:5C:17:
 
 | Section | Answer |
 | --- | --- |
-| Privacy policy | `https://saatvik333.github.io/guitar-tuner-site/privacy` |
+| Privacy policy | `https://saatvik333.github.io/guitar-tuner-android/privacy` |
 | App access | All functionality is available without any access restrictions |
 | Ads | No, my app does not contain ads |
 | Content rating | Email: your contact email. Category: **All other app types**. Answer **No** to every question (no violence, sexuality, language, controlled substances, gambling, user interaction or content sharing, location sharing, digital purchases). Expected result: Everyone / PEGI 3 / IARC 3+ |
@@ -60,7 +60,7 @@ anything that changes these answers: accounts, purchases, ads, or sending audio 
 | 10-inch tablet screenshots | `images/tenInchScreenshots/1–3.png` (2560×1600) |
 
 **Store settings:** category **Music & Audio**; contact email `saatvik333sharma@gmail.com`; website
-`https://saatvik333.github.io/guitar-tuner-site/`.
+`https://saatvik333.github.io/guitar-tuner-android/`.
 
 The screenshots are reproducible: `./build.sh`, then `tools/store_screenshots.sh` boots the emulator,
 feeds its virtual microphone plucked strings and captures every listing screenshot.

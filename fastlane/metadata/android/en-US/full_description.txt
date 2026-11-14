@@ -25,4 +25,4 @@ Standard, Drop D, Half step down, Full step down, Drop C, DADGAD, Open G, Open D
 <b>Privacy</b>
 The microphone is used only to hear your instrument. Sound is analysed on your phone as it comes in; it is never saved or sent anywhere. The app doesn't have permission to use the internet.
 
-Privacy policy: https://saatvik333.github.io/guitar-tuner-site/privacy
+Privacy policy: https://saatvik333.github.io/guitar-tuner-android/privacy
