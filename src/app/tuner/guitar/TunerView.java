@@ -2,7 +2,6 @@ package app.tuner.guitar;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Insets;
 import android.graphics.Rect;
 import android.os.Build;
 import android.os.Bundle;
@@ -10,28 +9,31 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.util.TypedValue;
-import android.view.DisplayCutout;
 import android.view.HapticFeedbackConstants;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
-import android.view.ViewParent;
 import android.view.WindowInsets;
-import android.view.accessibility.AccessibilityEvent;
-import android.view.accessibility.AccessibilityManager;
-import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityNodeProvider;
 
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import me.saatvik.hairline.Access;
+import me.saatvik.hairline.Chrome;
+import me.saatvik.hairline.Hits;
+import me.saatvik.hairline.Kit;
+import me.saatvik.hairline.Motion;
+import me.saatvik.hairline.Palette;
+import me.saatvik.hairline.Themes;
+
 /**
- * Owns animation state, input and accessibility; delegates drawing to {@link Renderer}.
- * Pitch frames arrive from the capture thread through {@link #offer} and are drained on the UI
- * thread into the {@link Tracker}; a frame is drawn only when something visible changed.
+ * Owns animation state and input; delegates drawing to {@link Renderer}, accessibility and keys to
+ * {@link Access}. Pitch frames arrive from the capture thread through {@link #offer} and are
+ * drained on the UI thread into the {@link Tracker}; a frame is drawn only when something visible changed.
  */
-final class TunerView extends View {
+final class TunerView extends View implements Access.Nodes {
 
     interface Host {
         void onThemeApplied(Palette target);
@@ -59,8 +61,8 @@ final class TunerView extends View {
     private final Palette[] themes;
     private final Host host;
     private final float slop;
-    private final A11y a11y = new A11y();
-    private final AccessibilityManager am;
+    private final Access access = new Access(this, ui.hits, this);
+    private final Rect insets = new Rect();
 
     private int themeIdx, tuningIdx;
     private Palette palFrom, palTo;
@@ -119,14 +121,11 @@ final class TunerView extends View {
     private int shownMidi = Integer.MIN_VALUE, shownCentsQ = Integer.MIN_VALUE, shownHzQ = Integer.MIN_VALUE, shownState = -1,
             shownOther = -2;
     private String description = "";
-    private String dialSpoken = "";
-    private long dialSpokenNs;
 
     private int downId, repeatId;
     private boolean repeated;
     private float downX, downY, lastY;
-    private boolean swiping, scrolling, multi;
-    private int hitSig;
+    private boolean scrolling, multi;
 
     // ---- frames from the capture thread ----
     private static final int Q = 64;
@@ -168,9 +167,9 @@ final class TunerView extends View {
     private final Runnable repeater = new Runnable() {
         @Override
         public void run() {
-            if (repeatId == 0 || ui.pressedId != repeatId) return;
+            if (repeatId == 0 || ui.hits.pressed != repeatId) return;
             repeated = true;
-            action(repeatId);
+            activate(repeatId);
             postDelayed(this, 70);
         }
     };
@@ -181,18 +180,19 @@ final class TunerView extends View {
         this.settings = settings;
         this.themes = themes;
         this.host = host;
-        am = (AccessibilityManager) ctx.getSystemService(Context.ACCESSIBILITY_SERVICE);
         DisplayMetrics dm = getResources().getDisplayMetrics();
         ui.dp = dm.density;
-        // the font-size setting (non-linear from Android 14), up to 1.3x: larger text no longer fits
-        ui.sp = Math.min(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 1f, dm), dm.density * 1.3f);
+        // the font-size setting (non-linear from Android 14), up to the design system's cap
+        ui.sp = Math.min(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 1f, dm), dm.density * Kit.MAX_FONT_SCALE);
         slop = ViewConfiguration.get(ctx).getScaledTouchSlop();
 
-        themeIdx = 0;
-        for (int i = 0; i < themes.length; i++) if (themes[i].name.equals(settings.theme)) themeIdx = i;
+        themeIdx = Themes.indexOf(themes, settings.theme);
         palFrom = palTo = themes[themeIdx];
         ui.pal = palTo;
-        ui.themeName = palTo.name;
+        ui.themes = themes;
+        ui.themeIdx = themeIdx;
+        ui.tolOpts = new String[Settings.TOLERANCE.length];
+        for (int i = 0; i < ui.tolOpts.length; i++) ui.tolOpts[i] = String.format(Locale.US, "±%d ¢", Math.round(Settings.TOLERANCE[i]));
         tuningIdx = Tuning.indexOf(settings.tuning);
         applyTuning(true);
         syncSettings(true);
@@ -579,10 +579,11 @@ final class TunerView extends View {
         return Tuning.freq(lo, settings.a4) * Math.pow(2.0, -600.0 / 1200.0);   // a slack string still counts
     }
 
-    boolean handleBack() {
+    /** Closes settings, stops the reference tone, or goes from Advanced to Easy; false on Easy. Escape and system back. */
+    @Override
+    public boolean back() {
         if (page == PAGE_SETTINGS) {
-            page = basePage;
-            announce(page == PAGE_GUIDE ? "Easy tuner" : "Advanced tuner");
+            closeSettings();
             invalidate();
             return true;
         }
@@ -597,34 +598,22 @@ final class TunerView extends View {
         return false;
     }
 
+    /** Back to the tab settings opened over; keyboard focus returns to the settings button. */
+    private void closeSettings() {
+        page = basePage;
+        access.pageChanged(Renderer.H_SETTINGS);
+        announce(page == PAGE_GUIDE ? "Easy tuner" : "Advanced tuner");
+    }
+
     // ---- layout ------------------------------------------------------------------------------
 
     @Override
     public WindowInsets onApplyWindowInsets(WindowInsets in) {
-        int l, t, r, b;
-        if (Build.VERSION.SDK_INT >= 30) {
-            Insets s = in.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
-            l = s.left;
-            t = s.top;
-            r = s.right;
-            b = s.bottom;
-        } else {
-            l = in.getSystemWindowInsetLeft();
-            t = in.getSystemWindowInsetTop();
-            r = in.getSystemWindowInsetRight();
-            b = in.getSystemWindowInsetBottom();
-            DisplayCutout cut = Build.VERSION.SDK_INT >= 28 ? in.getDisplayCutout() : null;
-            if (cut != null) {                   // the system window insets leave the cutout out
-                l = Math.max(l, cut.getSafeInsetLeft());
-                t = Math.max(t, cut.getSafeInsetTop());
-                r = Math.max(r, cut.getSafeInsetRight());
-                b = Math.max(b, cut.getSafeInsetBottom());
-            }
-        }
-        ui.insetL = l;
-        ui.insetT = t;
-        ui.insetR = r;
-        ui.insetB = b;
+        Chrome.insets(in, insets);
+        ui.insetL = insets.left;
+        ui.insetT = insets.top;
+        ui.insetR = insets.right;
+        ui.insetB = insets.bottom;
         invalidate();
         return in;
     }
@@ -651,18 +640,12 @@ final class TunerView extends View {
         lastNs = now;
         boolean animating = step(dt, now);
         renderer.draw(c, ui);
-        if (ui.settingsScroll > ui.settingsMaxScroll) ui.settingsScroll = ui.settingsMaxScroll;
-        if (ui.focusId != 0) {
-            Ui.Hit f = ui.find(ui.focusId);
-            if (f == null) {
-                ui.focusId = nearestFocusable(focusX, focusY);   // scrolled away or page changed
-                if (ui.focusId != 0) invalidate();
-            } else {
-                focusX = f.rect.centerX();
-                focusY = f.rect.centerY();
-            }
-        }
-        a11yAfterFrame(now);
+        access.afterFrame();
+        // The reading is phrased in whole cents, so it changes only when a listener would care.
+        int live = ui.hits.find(Renderer.H_DIAL) != null ? Renderer.H_DIAL
+                : ui.hits.find(Renderer.H_GUIDE) != null ? Renderer.H_GUIDE : 0;
+        boolean unsaid = access.live(live, live == Renderer.H_GUIDE ? gDescription : description, now);
+        if (unsaid && running) postInvalidateDelayed(300);   // come back to say the settled reading
         if (running && animating) postInvalidateOnAnimation();
         else lastNs = 0;                   // next frame after an idle gap starts with a nominal dt
     }
@@ -672,14 +655,15 @@ final class TunerView extends View {
         boolean tabAnim = false;                 // drawn only while a tab shows
 
         if (palT < 1f) {
-            palT = Math.min(1f, palT + dt / 0.45f);
-            ui.pal = Palette.lerp(palFrom, palTo, ease(palT));
+            palT = Math.min(1f, palT + dt / Motion.THEME);
+            ui.pal = Palette.lerp(palFrom, palTo, Motion.ease(palT));
             anim = true;
         }
         float ps = page == PAGE_SETTINGS ? 1f : 0f, pg = guideMode() ? 1f : 0f;
-        ui.pageT = approach(ui.pageT, ps, dt, 0.085f);
-        ui.guideT = approach(ui.guideT, pg, dt, 0.085f);
+        ui.pageT = Motion.approach(ui.pageT, ps, dt, Motion.PAGE);
+        ui.guideT = Motion.approach(ui.guideT, pg, dt, Motion.PAGE);
         anim |= ui.pageT != ps || ui.guideT != pg;
+        access.list = page == PAGE_SETTINGS ? ui.page : null;
         host.setBackIntercept(page != PAGE_GUIDE || toneOn);           // host no-ops if unchanged
         ui.time = (now - t0Ns) * 1e-9f;
 
@@ -690,9 +674,9 @@ final class TunerView extends View {
         boolean showing = (overlay ? strumBead : tracker.hasNote) && !toneOn && !paused && mic == MIC_OK && !silent;
         float nt = showing ? 1f : 0f, lt = showing && tracker.live && !strumView ? 1f : 0f;
         float tt = showing && !strumView && (tracker.live && tracker.inTune || guideMode() && gAdvancing) ? 1f : 0f;
-        ui.noteT = approach(ui.noteT, nt, dt, 0.12f);
-        ui.liveT = approach(ui.liveT, lt, dt, 0.10f);
-        ui.tuneT = approach(ui.tuneT, tt, dt, 0.07f);
+        ui.noteT = Motion.approach(ui.noteT, nt, dt, 0.12f);
+        ui.liveT = Motion.approach(ui.liveT, lt, dt, 0.10f);
+        ui.tuneT = Motion.approach(ui.tuneT, tt, dt, 0.07f);
         tabAnim |= ui.noteT != nt || ui.liveT != lt || ui.tuneT != tt;
 
         float target = strumBead ? Renderer.beadOf(strumResult.cents[worst])
@@ -712,11 +696,11 @@ final class TunerView extends View {
         }
 
         float st = tuning().chromatic() ? 0f : 1f;
-        ui.stringsT = approach(ui.stringsT, st, dt, 0.09f);
+        ui.stringsT = Motion.approach(ui.stringsT, st, dt, 0.09f);
         tabAnim |= ui.stringsT != st;
         int tgt = toneOn ? toneString : strumView ? worst : tracker.hasNote ? tracker.string : -1;
         float sv = strumView ? 1f : 0f;
-        ui.strumT = approach(ui.strumT, sv, dt, 0.1f);
+        ui.strumT = Motion.approach(ui.strumT, sv, dt, 0.1f);
         tabAnim |= ui.strumT != sv;
         ui.strumOk = (float) strumOk();
         for (int i = 0; i < ui.stringCount; i++) {
@@ -726,16 +710,20 @@ final class TunerView extends View {
             float a = (tracker.tunedMask & (1 << i)) != 0 ? 1f : 0f;
             float b = i == tgt ? (toneOn || (tracker.live && !paused) ? 1f : 0.5f) : 0f;
             float k = tracker.locked == i ? 1f : 0f;
-            ui.sTunedT[i] = approach(ui.sTunedT[i], a, dt, 0.08f);
-            ui.sTargetT[i] = approach(ui.sTargetT[i], b, dt, 0.08f);
-            ui.sLockT[i] = approach(ui.sLockT[i], k, dt, 0.08f);
+            ui.sTunedT[i] = Motion.approach(ui.sTunedT[i], a, dt, 0.08f);
+            ui.sTargetT[i] = Motion.approach(ui.sTargetT[i], b, dt, 0.08f);
+            ui.sLockT[i] = Motion.approach(ui.sLockT[i], k, dt, 0.08f);
             tabAnim |= ui.sTunedT[i] != a || ui.sTargetT[i] != b || ui.sLockT[i] != k;
         }
 
         float h = settings.haptics ? 1f : 0f, ko = settings.keepOn ? 1f : 0f;
-        ui.hapticsT = approach(ui.hapticsT, h, dt, 0.06f);
-        ui.keepOnT = approach(ui.keepOnT, ko, dt, 0.06f);
-        anim |= ui.hapticsT != h || ui.keepOnT != ko;
+        ui.hapticsT = Motion.approach(ui.hapticsT, h, dt, Motion.CONTROL);
+        ui.keepOnT = Motion.approach(ui.keepOnT, ko, dt, Motion.CONTROL);
+        ui.tolPos = Motion.approach(ui.tolPos, ui.tolIdx, dt, Motion.CONTROL);
+        ui.needlePos = Motion.approach(ui.needlePos, ui.needle, dt, Motion.CONTROL);
+        ui.namesPos = Motion.approach(ui.namesPos, ui.names, dt, Motion.CONTROL);
+        anim |= ui.hapticsT != h || ui.keepOnT != ko || ui.tolPos != ui.tolIdx || ui.needlePos != ui.needle
+                || ui.namesPos != ui.names;
 
         ui.toneOn = toneOn;
         ui.paused = paused;
@@ -964,11 +952,10 @@ final class TunerView extends View {
         description = s;
     }
 
-    // announceForAccessibility is deprecated from 36 in favour of live regions and pane titles. What
-    // is said here are moments (reaching pitch, a tab or mode switched, a refusal), not text left on
-    // screen to re-read; the readings themselves are the throttled live region.
+    // What is said here are moments (reaching pitch, a tab or mode switched, a refusal), not text
+    // left on screen to re-read; the readings themselves are the throttled live region.
     private void announce(String s) {
-        if (am != null && am.isEnabled()) announceForAccessibility(s);
+        access.announce(s);
     }
 
     // ---- input -------------------------------------------------------------------------------
@@ -981,11 +968,11 @@ final class TunerView extends View {
                 downX = x;
                 downY = y;
                 lastY = y;
-                swiping = scrolling = multi = repeated = false;
-                ui.focusId = 0;
-                downId = ui.hitAt(x, y);
-                ui.pressedId = downId;
-                if (downId == Renderer.H_A4_PREV || downId == Renderer.H_A4_NEXT) {
+                scrolling = multi = repeated = false;
+                ui.hits.focused = 0;                   // touch hides the keyboard focus ring
+                downId = ui.hits.at(x, y);
+                ui.hits.pressed = downId;
+                if (ui.page.repeats(downId)) {         // a finger held on a stepper chevron steps on
                     repeatId = downId;
                     postDelayed(repeater, 450);
                 }
@@ -998,47 +985,32 @@ final class TunerView extends View {
             case MotionEvent.ACTION_MOVE: {
                 if (multi) return true;
                 float dx = x - downX, dy = y - downY;
-                if (!swiping && !scrolling && !repeated && page != PAGE_SETTINGS && Math.abs(dx) > slop * 2f && Math.abs(dx) > Math.abs(dy) * 1.5f) {
-                    swiping = true;
-                }
-                if (!swiping && !scrolling && !repeated && page == PAGE_SETTINGS && ui.settingsMaxScroll > 0f
+                if (!scrolling && !repeated && page == PAGE_SETTINGS && ui.page.maxScroll > 0f
                         && Math.abs(dy) > slop && Math.abs(dy) > Math.abs(dx)) {
                     scrolling = true;
                 }
-                if (scrolling) {
-                    ui.settingsScroll = clamp(ui.settingsScroll - (y - lastY), 0f, ui.settingsMaxScroll);
-                    invalidate();
-                }
+                if (scrolling && ui.page.scrollBy(lastY - y)) invalidate();
                 lastY = y;
-                if (swiping || scrolling || (ui.pressedId != 0 && ui.hitAt(x, y) != downId)) {
-                    if (ui.pressedId != 0) {
-                        ui.pressedId = 0;
-                        repeatId = 0;
-                        removeCallbacks(repeater);
-                        invalidate();
-                    }
+                if (ui.hits.pressed != 0 && (scrolling || ui.hits.at(x, y) != downId)) {
+                    ui.hits.pressed = 0;
+                    repeatId = 0;
+                    removeCallbacks(repeater);
+                    invalidate();
                 }
                 return true;
             }
             case MotionEvent.ACTION_UP: {
-                float dx = x - downX;
                 removeCallbacks(repeater);
-                ui.pressedId = 0;
-                if (!multi) {
-                    if (swiping) {
-                        if (Math.abs(dx) > 64f * ui.dp) setTheme(themeIdx + (dx < 0f ? 1 : -1));
-                    } else if (!scrolling && !repeated && downId != 0 && ui.hitAt(x, y) == downId) {
-                        action(downId);
-                    }
-                }
-                swiping = scrolling = multi = repeated = false;
+                ui.hits.pressed = 0;
+                if (!multi && !scrolling && !repeated && downId != 0 && ui.hits.at(x, y) == downId) activate(downId);
+                scrolling = multi = repeated = false;
                 downId = repeatId = 0;
                 invalidate();
                 return true;
             }
             case MotionEvent.ACTION_CANCEL:
                 cancelPress();
-                swiping = scrolling = multi = false;
+                scrolling = multi = false;
                 return true;
             default:
                 return true;
@@ -1283,7 +1255,7 @@ final class TunerView extends View {
 
         ui.gTitleT = Math.min(1f, ui.gTitleT + dt / 0.35f);
         ui.gWordT = Math.min(1f, ui.gWordT + dt / 0.25f);
-        ui.gCursor = approach(ui.gCursor, gStep, dt, 0.09f);
+        ui.gCursor = Motion.approach(ui.gCursor, gStep, dt, 0.09f);
         boolean ok = mic == MIC_OK && !silent && !paused && !toneOn;
         boolean waiting = ok && !gComplete && !gAdvancing && !tracker.live;
         // Easy is the home screen: the demonstration plays three times, then rests (no frames,
@@ -1296,13 +1268,13 @@ final class TunerView extends View {
             ui.gPluckT = -1f;
         }
         boolean live = ok && tracker.live && !gComplete;
-        ui.gVib = approach(ui.gVib, live ? 1f : 0f, dt, live ? 0.05f : 0.4f);
+        ui.gVib = Motion.approach(ui.gVib, live ? 1f : 0f, dt, live ? 0.05f : 0.4f);
         float sag = tracker.hasNote && !gComplete ? (float) Math.max(0.0, Math.min(1.0, -tracker.cents / 150.0)) : 0f;
-        ui.gSag = approach(ui.gSag, sag, dt, 0.15f);
+        ui.gSag = Motion.approach(ui.gSag, sag, dt, 0.15f);
         int gs = guide.status;
         boolean direction = gs == Guide.TIGHTEN || gs == Guide.LOOSEN || gs == Guide.WRONG_WAY || gs == Guide.ALMOST;
         float chev = live && !gAdvancing && direction && Math.abs(tracker.cents) > tracker.tolerance ? 1f : 0f;
-        ui.gChevT = approach(ui.gChevT, chev, dt, 0.12f);
+        ui.gChevT = Motion.approach(ui.gChevT, chev, dt, 0.12f);
         if (ui.gShakeT >= 0f) {
             ui.gShakeT += dt / 0.5f;
             if (ui.gShakeT >= 1f) ui.gShakeT = -1f;
@@ -1317,201 +1289,34 @@ final class TunerView extends View {
 
     private static final float DEMO_S = 3 * 2.8f;
 
-    // ---- keyboard and D-pad -------------------------------------------------------------------
-
-    private float focusX, focusY;
+    // ---- keyboard and D-pad: Access moves a focus ring over the targets ------------------------
 
     @Override
     protected void onFocusChanged(boolean gained, int direction, Rect previous) {
         super.onFocusChanged(gained, direction, previous);
-        if (gained && !isInTouchMode() && ui.focusId == 0) {
-            ui.focusId = firstFocusable();
-            invalidate();
-        } else if (!gained && ui.focusId != 0) {
-            ui.focusId = 0;
-            invalidate();
-        }
+        access.onFocusChanged(gained);
     }
 
     @Override
     public boolean onKeyDown(int code, KeyEvent e) {
-        switch (code) {
-            case KeyEvent.KEYCODE_DPAD_LEFT: return moveFocus(-1, 0);
-            case KeyEvent.KEYCODE_DPAD_RIGHT: return moveFocus(1, 0);
-            case KeyEvent.KEYCODE_DPAD_UP: return moveFocus(0, -1);
-            case KeyEvent.KEYCODE_DPAD_DOWN: return moveFocus(0, 1);
-            case KeyEvent.KEYCODE_TAB: return stepFocus(e.isShiftPressed() ? -1 : 1);
-            case KeyEvent.KEYCODE_DPAD_CENTER:
-            case KeyEvent.KEYCODE_ENTER:
-            case KeyEvent.KEYCODE_NUMPAD_ENTER:
-            case KeyEvent.KEYCODE_SPACE: {
-                if (ui.focusId == 0 || ui.find(ui.focusId) == null) return stepFocus(1);
-                int id = ui.focusId;
-                boolean repeats = id == Renderer.H_A4_PREV || id == Renderer.H_A4_NEXT;
-                if (e.getRepeatCount() == 0 || repeats) {
-                    ui.pressedId = id;
-                    action(id);
-                    a11y.send(id, AccessibilityEvent.TYPE_VIEW_CLICKED);
-                    invalidate();
-                }
-                return true;
-            }
-            case KeyEvent.KEYCODE_ESCAPE:
-                return handleBack();
-            default:
-                return super.onKeyDown(code, e);
-        }
+        return access.onKeyDown(code, e) || super.onKeyDown(code, e);
     }
 
     @Override
     public boolean onKeyUp(int code, KeyEvent e) {
-        switch (code) {
-            case KeyEvent.KEYCODE_DPAD_CENTER:
-            case KeyEvent.KEYCODE_ENTER:
-            case KeyEvent.KEYCODE_NUMPAD_ENTER:
-            case KeyEvent.KEYCODE_SPACE:
-                if (ui.pressedId != 0) {
-                    ui.pressedId = 0;
-                    invalidate();
-                }
-                return true;
-            default:
-                return super.onKeyUp(code, e);
-        }
-    }
-
-    /**
-     * The node does something when activated. The dial and a message without a button only read.
-     * The guide's meter is a button when a tap has something to do: with Auto off and the string
-     * tuned, Next; in windows too short for the Skip / Auto row, that row's Next / Skip.
-     */
-    private boolean acts(int id) {
-        if (id == Renderer.H_DIAL) return false;
-        if (id == Renderer.H_MIC) return ui.messageAction.length() > 0;
-        if (id == Renderer.H_GUIDE) {
-            return guideMode() && !gComplete && (!ui.gPills || !settings.guideAuto && (tracker.tunedMask & (1 << gStep)) != 0);
-        }
-        return true;
-    }
-
-    /** Reading order: rows top to bottom, then left to right. */
-    private float order(Ui.Hit h) {
-        float row = Math.round(h.rect.centerY() / (24f * ui.dp));
-        return row * 100000f + h.rect.centerX();
-    }
-
-    private int firstFocusable() {
-        int best = 0;
-        float bo = Float.MAX_VALUE;
-        for (int i = 0; i < ui.hitCount; i++) {
-            Ui.Hit h = ui.hits[i];
-            if (!acts(h.id)) continue;
-            float o = order(h);
-            if (o < bo) {
-                bo = o;
-                best = h.id;
-            }
-        }
-        return best;
-    }
-
-    private int nearestFocusable(float x, float y) {
-        int best = 0;
-        float bd = Float.MAX_VALUE;
-        for (int i = 0; i < ui.hitCount; i++) {
-            Ui.Hit h = ui.hits[i];
-            if (!acts(h.id)) continue;
-            float dx = h.rect.centerX() - x, dy = h.rect.centerY() - y;
-            float d = dx * dx + dy * dy;
-            if (d < bd) {
-                bd = d;
-                best = h.id;
-            }
-        }
-        return best;
-    }
-
-    private boolean stepFocus(int dir) {
-        Ui.Hit cur = ui.focusId != 0 ? ui.find(ui.focusId) : null;
-        if (cur == null) {
-            ui.focusId = firstFocusable();
-        } else {
-            float co = order(cur);
-            int best = 0;
-            float bo = dir > 0 ? Float.MAX_VALUE : -Float.MAX_VALUE;
-            for (int i = 0; i < ui.hitCount; i++) {
-                Ui.Hit h = ui.hits[i];
-                if (!acts(h.id) || h == cur) continue;
-                float o = order(h);
-                if (dir > 0 ? (o > co && o < bo) : (o < co && o > bo)) {
-                    bo = o;
-                    best = h.id;
-                }
-            }
-            if (best == 0) return false;                   // let the system move focus on
-            ui.focusId = best;
-        }
-        focusMoved();
-        return true;
-    }
-
-    private boolean moveFocus(int dx, int dy) {
-        Ui.Hit cur = ui.focusId != 0 ? ui.find(ui.focusId) : null;
-        if (cur == null) {
-            ui.focusId = firstFocusable();
-            focusMoved();
-            return true;
-        }
-        float x = cur.rect.centerX(), y = cur.rect.centerY();
-        int best = 0;
-        float bs = Float.MAX_VALUE;
-        for (int i = 0; i < ui.hitCount; i++) {
-            Ui.Hit h = ui.hits[i];
-            if (!acts(h.id) || h == cur) continue;
-            float hx = h.rect.centerX() - x, hy = h.rect.centerY() - y;
-            float along = hx * dx + hy * dy, across = Math.abs(hx * dy - hy * dx);
-            if (along < 4f * ui.dp) continue;
-            float score = along + 3f * across;
-            if (score < bs) {
-                bs = score;
-                best = h.id;
-            }
-        }
-        if (best == 0 && dy != 0 && page == PAGE_SETTINGS && ui.settingsMaxScroll > 0f) {
-            // the next row is scrolled out of view: bring it in
-            float to = clamp(ui.settingsScroll + dy * 96f * ui.dp, 0f, ui.settingsMaxScroll);
-            if (to != ui.settingsScroll) {
-                ui.settingsScroll = to;
-                invalidate();
-            }
-            return true;
-        }
-        if (best != 0) {
-            ui.focusId = best;
-            focusMoved();
-        }
-        return true;
-    }
-
-    private void focusMoved() {
-        Ui.Hit h = ui.find(ui.focusId);
-        if (h != null) {
-            focusX = h.rect.centerX();
-            focusY = h.rect.centerY();
-            a11y.send(ui.focusId, AccessibilityEvent.TYPE_VIEW_FOCUSED);
-        }
-        invalidate();
+        return access.onKeyUp(code, e) || super.onKeyUp(code, e);
     }
 
     private void cancelPress() {
         removeCallbacks(repeater);
-        ui.pressedId = 0;
+        ui.hits.pressed = 0;
         downId = repeatId = 0;
-        swiping = scrolling = false;
+        scrolling = false;
         invalidate();
     }
 
-    private void action(int id) {
+    @Override
+    public void activate(int id) {
         if (!acts(id)) return;                            // a tap on text: no buzz either
         boolean changed = false;
         if (id >= Renderer.H_GSTRING && id < Renderer.H_GSTRING + Ui.MAX_STRINGS) {
@@ -1539,18 +1344,14 @@ final class TunerView extends View {
             return;
         }
         switch (id) {
-            case Renderer.H_THEME_PREV: setTheme(themeIdx - 1); break;
-            case Renderer.H_THEME_NEXT: setTheme(themeIdx + 1); break;
             case Renderer.H_SETTINGS:
                 if (page != PAGE_SETTINGS) basePage = page;
                 page = PAGE_SETTINGS;
-                ui.settingsScroll = 0f;
+                ui.page.scroll = 0f;
+                access.pageChanged(0);
                 announce("Settings");
                 break;
-            case Renderer.H_BACK:
-                page = basePage;
-                announce(page == PAGE_GUIDE ? "Easy tuner" : "Advanced tuner");
-                break;
+            case Renderer.H_BACK: closeSettings(); break;
             case Renderer.H_TONE:
                 // stopping it on a tuned string waits for a pluck that rings out (guideWatch):
                 // nothing is measured while the tone plays, so the string has not been re-checked
@@ -1595,26 +1396,31 @@ final class TunerView extends View {
             // Advanced only: a tap landing in the moment Easy fades in must not change the tuning
             case Renderer.H_TUNING_PREV: if (!guideMode()) setTuning(tuningIdx - 1); changed = true; break;
             case Renderer.H_TUNING_NEXT: if (!guideMode()) setTuning(tuningIdx + 1); changed = true; break;
-            case Renderer.H_A4_PREV:
+            case Renderer.H_A4:
                 if (settings.a4 > Settings.A4_MIN) settings.a4--;
                 changed = true;
                 break;
-            case Renderer.H_A4_NEXT:
+            case Renderer.H_A4 + 1:
                 if (settings.a4 < Settings.A4_MAX) settings.a4++;
                 changed = true;
                 break;
-            case Renderer.H_TOL_PREV: settings.tolIdx = wrapIdx(settings.tolIdx - 1, Settings.TOLERANCE.length); changed = true; break;
-            case Renderer.H_TOL_NEXT: settings.tolIdx = wrapIdx(settings.tolIdx + 1, Settings.TOLERANCE.length); changed = true; break;
-            case Renderer.H_NEEDLE_PREV:
-            case Renderer.H_NEEDLE_NEXT: settings.fast = !settings.fast; changed = true; break;
-            case Renderer.H_NAMES_PREV:
-            case Renderer.H_NAMES_NEXT: settings.flats = !settings.flats; changed = true; break;
             case Renderer.H_HAPTIC: settings.haptics = !settings.haptics; changed = true; break;
-            case Renderer.H_KEEPON:
-                settings.keepOn = !settings.keepOn;
+            case Renderer.H_KEEPON: settings.keepOn = !settings.keepOn; changed = true; break;
+            default:
+                if (id >= Renderer.H_TOL && id < Renderer.H_TOL + Settings.TOLERANCE.length) {
+                    settings.tolIdx = id - Renderer.H_TOL;
+                } else if (id >= Renderer.H_NEEDLE && id < Renderer.H_NEEDLE + Renderer.NEEDLES.length) {
+                    settings.fast = id - Renderer.H_NEEDLE == 1;
+                } else if (id >= Renderer.H_NAMES && id < Renderer.H_NAMES + Renderer.NAMES.length) {
+                    settings.flats = id - Renderer.H_NAMES == 1;
+                } else if (id >= Renderer.H_THEME && id < Renderer.H_THEME + themes.length) {
+                    setTheme(id - Renderer.H_THEME);
+                    break;
+                } else {
+                    return;
+                }
                 changed = true;
                 break;
-            default: return;
         }
         buzz(false);
         if (changed) {
@@ -1662,11 +1468,12 @@ final class TunerView extends View {
     }
 
     private void setTheme(int idx) {
-        themeIdx = wrapIdx(idx, themes.length);
+        if (idx == themeIdx) return;
+        themeIdx = idx;
         palFrom = ui.pal;
         palTo = themes[themeIdx];
         palT = 0f;
-        ui.themeName = palTo.name;
+        ui.themeIdx = themeIdx;
         settings.theme = palTo.name;
         host.onThemeApplied(palTo);
         host.onSettingsChanged();
@@ -1726,15 +1533,19 @@ final class TunerView extends View {
         applyTrackerMode();
         tracker.fast = settings.fast;
         ui.a4Label = "A4 = " + settings.a4 + " Hz";
-        float tol = Settings.TOLERANCE[settings.tolIdx];
-        ui.tolLabel = String.format(Locale.US, "± %d ¢", Math.round(tol));
-        ui.needleLabel = settings.fast ? "Fast" : "Smooth";
-        ui.namesLabel = settings.flats ? "Flats" : "Sharps";
+        ui.tolIdx = settings.tolIdx;
+        ui.needle = settings.fast ? 1 : 0;
+        ui.names = settings.flats ? 1 : 0;
+        ui.haptics = settings.haptics;
+        ui.keepOn = settings.keepOn;
         respell();
         if (toneOn) host.playTone(Tuning.freq(toneMidi, settings.a4));
         if (snap) {
             ui.hapticsT = settings.haptics ? 1f : 0f;
             ui.keepOnT = settings.keepOn ? 1f : 0f;
+            ui.tolPos = ui.tolIdx;
+            ui.needlePos = ui.needle;
+            ui.namesPos = ui.names;
         }
         shownState = -1;
     }
@@ -1748,49 +1559,22 @@ final class TunerView extends View {
     }
 
     // ---- accessibility -----------------------------------------------------------------------
-    // The whole UI is one custom view; every hit target is a virtual node so TalkBack, Switch
-    // Access and keyboard users can reach the controls. The dial is a polite live region that
-    // speaks the reading at most every 1.5 s.
+    // The whole UI is one custom view: every target is a virtual node (Access), so TalkBack, Switch
+    // Access and keyboard users reach the controls. The dial, or the guide's meter, is a polite
+    // live region that says the reading at most every 1.5 s (onDraw).
 
     @Override
     public AccessibilityNodeProvider getAccessibilityNodeProvider() {
-        return a11y;
+        return access;
     }
 
     @Override
     protected boolean dispatchHoverEvent(MotionEvent e) {
-        return a11y.onHover(e) || super.dispatchHoverEvent(e);
+        return access.onHover(e) || super.dispatchHoverEvent(e);
     }
 
-    private void a11yAfterFrame(long now) {
-        if (am == null || !am.isEnabled()) return;
-        a11y.prune();
-        int sig = 17;
-        for (int i = 0; i < ui.hitCount; i++) sig = sig * 31 + ui.hits[i].id;
-        if (page == PAGE_SETTINGS) sig = sig * 31 + Math.round(ui.settingsScroll / ui.dp);
-        ViewParent parent = getParent();
-        if (sig != hitSig && parent != null) {
-            hitSig = sig;
-            AccessibilityEvent ev = event(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
-            onInitializeAccessibilityEvent(ev);
-            ev.setContentChangeTypes(AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE);
-            parent.requestSendAccessibilityEvent(this, ev);
-        }
-        // The reading is phrased in whole cents, so it changes only when a listener would care.
-        int liveId = ui.find(Renderer.H_DIAL) != null ? Renderer.H_DIAL : ui.find(Renderer.H_GUIDE) != null ? Renderer.H_GUIDE : 0;
-        String said = liveId == Renderer.H_GUIDE ? gDescription : description;
-        if (liveId != 0 && !said.equals(dialSpoken)) {
-            if (now - dialSpokenNs > 1_500_000_000L) {
-                dialSpoken = said;
-                dialSpokenNs = now;
-                a11y.send(liveId, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
-            } else if (running) {
-                postInvalidateDelayed(300);            // come back to speak the settled reading
-            }
-        }
-    }
-
-    private String label(int id) {
+    @Override
+    public String label(int id) {
         if (id >= Renderer.H_GSTRING && id < Renderer.H_GSTRING + Ui.MAX_STRINGS) {
             int i = id - Renderer.H_GSTRING;
             Tuning t = tuning();
@@ -1809,9 +1593,12 @@ final class TunerView extends View {
             if (toneOn) return s + ". Play its reference tone";
             return s + (tracker.locked == i ? ", locked. Unlock" : ". Lock to this string");
         }
+        // the symbols on screen, in words: "±2 ¢" and "Hz" are not reliably spoken
+        if (id >= Renderer.H_TOL && id < Renderer.H_TOL + Settings.TOLERANCE.length) {
+            int c = Math.round(Settings.TOLERANCE[id - Renderer.H_TOL]);
+            return "In-tune range, plus or minus " + c + (c == 1 ? " cent" : " cents");
+        }
         switch (id) {
-            case Renderer.H_THEME_PREV: return "Previous theme. Current theme " + ui.themeName;
-            case Renderer.H_THEME_NEXT: return "Next theme. Current theme " + ui.themeName;
             case Renderer.H_SETTINGS: return "Settings";
             case Renderer.H_TONE: return "Reference tone";       // state is the switch's checked flag
             case Renderer.H_PAUSE: return "Listening";
@@ -1826,226 +1613,64 @@ final class TunerView extends View {
             case Renderer.H_MIC: return ui.messageAction.length() > 0 ? ui.message + ". " + ui.messageAction : ui.message;
             case Renderer.H_TUNING_PREV: return "Tuning " + ui.tuningName + ". Previous";
             case Renderer.H_TUNING_NEXT: return "Tuning " + ui.tuningName + ". Next";
-            case Renderer.H_A4_PREV: return "Reference pitch A4 " + settings.a4 + " hertz. Lower";
-            case Renderer.H_A4_NEXT: return "Reference pitch A4 " + settings.a4 + " hertz. Higher";
-            case Renderer.H_TOL_PREV: return "In-tune range plus or minus " + Math.round(Settings.TOLERANCE[settings.tolIdx]) + " cents. Narrower";
-            case Renderer.H_TOL_NEXT: return "In-tune range plus or minus " + Math.round(Settings.TOLERANCE[settings.tolIdx]) + " cents. Wider";
-            case Renderer.H_NEEDLE_PREV:
-            case Renderer.H_NEEDLE_NEXT: return "Needle " + ui.needleLabel + ". Change";
-            case Renderer.H_NAMES_PREV:
-            case Renderer.H_NAMES_NEXT: return "Note names " + ui.namesLabel + ". Change";
-            case Renderer.H_HAPTIC: return "Haptic feedback";
-            case Renderer.H_KEEPON: return "Keep screen on";
-            default: return "";
+            case Renderer.H_A4: return "Reference pitch, A4 " + settings.a4 + " hertz. Lower";
+            case Renderer.H_A4 + 1: return "Reference pitch, A4 " + settings.a4 + " hertz. Higher";
+            default: return ui.page.label(id);
         }
     }
 
-    private static boolean isToggle(int id) {
-        return id == Renderer.H_HAPTIC || id == Renderer.H_KEEPON || id == Renderer.H_TONE || id == Renderer.H_PAUSE
-                || id == Renderer.H_GUIDE_AUTO || id == Renderer.H_GUIDE_OPEN;
+    @Override
+    public int role(int id) {
+        int r = ui.page.role(id);
+        if (r >= 0) return r;
+        switch (id) {
+            case Renderer.H_TONE:
+            case Renderer.H_PAUSE:
+            case Renderer.H_GUIDE_AUTO:
+            case Renderer.H_GUIDE_OPEN: return Hits.SWITCH;
+            case Renderer.H_GUIDE: return Hits.TEXT;      // the advice; what a tap does is its click label
+            default: return acts(id) ? Hits.BUTTON : Hits.TEXT;
+        }
     }
 
-    private boolean checked(int id) {
+    @Override
+    public boolean checked(int id) {
         switch (id) {
-            case Renderer.H_HAPTIC: return settings.haptics;
-            case Renderer.H_KEEPON: return settings.keepOn;
             case Renderer.H_TONE: return toneOn;
             case Renderer.H_PAUSE: return !paused;
             case Renderer.H_GUIDE_AUTO: return settings.guideAuto;
             case Renderer.H_GUIDE_OPEN: return !guideMode();
-            default: return false;
+            default: return ui.page.checked(id);
         }
     }
 
-    private String className(int id) {
-        if (isToggle(id)) return "android.widget.Switch";
-        return id == Renderer.H_GUIDE || !acts(id) ? "android.widget.TextView" : "android.widget.Button";
+    /**
+     * The node does something when activated. The dial and a message without a button only read.
+     * The guide's meter is a button when a tap has something to do: with Auto off and the string
+     * tuned, Next; in windows too short for the Skip / Auto row, that row's Next / Skip.
+     */
+    @Override
+    public boolean acts(int id) {
+        if (id == Renderer.H_DIAL) return false;
+        if (id == Renderer.H_MIC) return ui.messageAction.length() > 0;
+        if (id == Renderer.H_GUIDE) {
+            return guideMode() && !gComplete && (!ui.gPills || !settings.guideAuto && (tracker.tunedMask & (1 << gStep)) != 0);
+        }
+        return true;
     }
 
-    /** Events are no longer pooled from 33, where obtain() is deprecated; the constructor exists from 30. */
-    private static AccessibilityEvent event(int type) {
-        return Build.VERSION.SDK_INT >= 30 ? new AccessibilityEvent(type) : AccessibilityEvent.obtain(type);
+    @Override
+    public CharSequence clickLabel(int id) {
+        if (id != Renderer.H_GUIDE) return null;
+        return settings.guideAuto && (tracker.tunedMask & (1 << gStep)) == 0 ? "Skip this string" : "Next string";
     }
 
-    private final class A11y extends AccessibilityNodeProvider {
-        private static final int NONE = Integer.MIN_VALUE;
-        private int focused = NONE, hovered = NONE;
-        private final Rect r = new Rect();
-        private final int[] loc = new int[2];
-
-        @Override
-        public AccessibilityNodeInfo createAccessibilityNodeInfo(int id) {
-            if (id == HOST_VIEW_ID) {
-                AccessibilityNodeInfo info = Build.VERSION.SDK_INT >= 30 ? new AccessibilityNodeInfo(TunerView.this)
-                        : AccessibilityNodeInfo.obtain(TunerView.this);     // pooled before 30, deprecated from 33
-                onInitializeAccessibilityNodeInfo(info);
-                for (int i = 0; i < ui.hitCount; i++) info.addChild(TunerView.this, ui.hits[i].id);
-                if (scrollable()) {
-                    info.setClassName("android.widget.ScrollView");
-                    info.setScrollable(true);
-                    if (ui.settingsScroll > 0f) {
-                        info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD);
-                    }
-                    if (ui.settingsScroll < ui.settingsMaxScroll) {
-                        info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD);
-                    }
-                }
-                return info;
-            }
-            Ui.Hit h = ui.find(id);
-            if (h == null) return null;
-            AccessibilityNodeInfo info = Build.VERSION.SDK_INT >= 30 ? new AccessibilityNodeInfo(TunerView.this, id)
-                    : AccessibilityNodeInfo.obtain(TunerView.this, id);
-            info.setPackageName(getContext().getPackageName());
-            info.setClassName(className(id));
-            info.setContentDescription(label(id));
-            if (isToggle(id)) {
-                info.setCheckable(true);
-                if (Build.VERSION.SDK_INT >= 36) {
-                    info.setChecked(checked(id) ? AccessibilityNodeInfo.CHECKED_STATE_TRUE : AccessibilityNodeInfo.CHECKED_STATE_FALSE);
-                } else {
-                    info.setChecked(checked(id));
-                }
-            }
-            info.setParent(TunerView.this);
-            r.set(Math.round(h.rect.left), Math.round(h.rect.top), Math.round(h.rect.right), Math.round(h.rect.bottom));
-            if (Build.VERSION.SDK_INT < 29) info.setBoundsInParent(r);   // services read only screen bounds from 29
-            getLocationOnScreen(loc);
-            r.offset(loc[0], loc[1]);
-            info.setBoundsInScreen(r);
-            info.setVisibleToUser(true);
-            info.setEnabled(true);
-            info.setFocusable(true);
-            if (id == Renderer.H_DIAL || id == Renderer.H_GUIDE) info.setLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-            if (acts(id)) {
-                info.setClickable(true);
-                // the meter's text is the advice; what a tap does is said as the action's label
-                info.addAction(id != Renderer.H_GUIDE ? AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK
-                        : new AccessibilityNodeInfo.AccessibilityAction(AccessibilityNodeInfo.ACTION_CLICK,
-                                settings.guideAuto && (tracker.tunedMask & (1 << gStep)) == 0 ? "Skip this string" : "Next string"));
-            }
-            if (focused == id) {
-                info.setAccessibilityFocused(true);
-                info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLEAR_ACCESSIBILITY_FOCUS);
-            } else {
-                info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_ACCESSIBILITY_FOCUS);
-            }
-            return info;
-        }
-
-        @Override
-        public boolean performAction(int id, int action, Bundle args) {
-            if (id == HOST_VIEW_ID) {
-                if (scrollable() && (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-                        || action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) {
-                    float pageH = Math.max(48f * ui.dp, (ui.height - ui.insetB - ui.insetT - 56f * ui.dp) * 0.8f);
-                    float to = clamp(ui.settingsScroll
-                            + (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD ? pageH : -pageH),
-                            0f, ui.settingsMaxScroll);
-                    if (to == ui.settingsScroll) return false;
-                    ui.settingsScroll = to;
-                    invalidate();
-                    sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_SCROLLED);
-                    return true;
-                }
-                return performAccessibilityAction(action, args);
-            }
-            if (ui.find(id) == null) return false;
-            switch (action) {
-                case AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS:
-                    if (focused != id) {
-                        int prev = focused;
-                        focused = id;
-                        if (prev != NONE) send(prev, AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED);
-                        send(id, AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED);
-                    }
-                    return true;
-                case AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS:
-                    if (focused == id) {
-                        focused = NONE;
-                        send(id, AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED);
-                    }
-                    return true;
-                case AccessibilityNodeInfo.ACTION_CLICK:
-                    if (!acts(id)) return false;
-                    action(id);
-                    send(id, AccessibilityEvent.TYPE_VIEW_CLICKED);
-                    return true;
-                default:
-                    return false;
-            }
-        }
-
-        private boolean scrollable() {
-            return page == PAGE_SETTINGS && ui.settingsMaxScroll > 0f;
-        }
-
-        void prune() {
-            if (focused != NONE && ui.find(focused) == null) focused = NONE;
-            if (hovered != NONE && ui.find(hovered) == null) hovered = NONE;
-        }
-
-        boolean onHover(MotionEvent e) {
-            if (am == null || !am.isEnabled() || !am.isTouchExplorationEnabled()) return false;
-            switch (e.getActionMasked()) {
-                case MotionEvent.ACTION_HOVER_ENTER:
-                case MotionEvent.ACTION_HOVER_MOVE: {
-                    int id = ui.hitAt(e.getX(), e.getY());
-                    setHovered(id == 0 ? NONE : id);
-                    return id != 0;
-                }
-                case MotionEvent.ACTION_HOVER_EXIT:
-                    if (hovered != NONE) {
-                        setHovered(NONE);
-                        return true;
-                    }
-                    return false;
-                default:
-                    return false;
-            }
-        }
-
-        private void setHovered(int id) {
-            if (id == hovered) return;
-            int prev = hovered;
-            hovered = id;
-            if (id != NONE) send(id, AccessibilityEvent.TYPE_VIEW_HOVER_ENTER);
-            if (prev != NONE) send(prev, AccessibilityEvent.TYPE_VIEW_HOVER_EXIT);
-        }
-
-        void send(int id, int type) {
-            if (am == null || !am.isEnabled()) return;
-            ViewParent parent = getParent();
-            if (parent == null) return;
-            AccessibilityEvent ev = event(type);
-            ev.setPackageName(getContext().getPackageName());
-            boolean toggle = isToggle(id);
-            ev.setClassName(className(id));
-            ev.setSource(TunerView.this, id);
-            ev.setEnabled(true);
-            ev.setContentDescription(label(id));
-            if (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
-                ev.setContentChangeTypes(AccessibilityEvent.CONTENT_CHANGE_TYPE_CONTENT_DESCRIPTION);
-            }
-            if (toggle) ev.setChecked(checked(id));
-            parent.requestSendAccessibilityEvent(TunerView.this, ev);
-        }
+    @Override
+    public boolean repeats(int id) {
+        return ui.page.repeats(id);
     }
 
     // ---- math --------------------------------------------------------------------------------
-
-    private static float approach(float v, float target, float dt, float tau) {
-        float n = target + (v - target) * (float) Math.exp(-dt / tau);
-        return Math.abs(n - target) < 0.002f ? target : n;
-    }
-
-    private static float ease(float t) {
-        return t < 0.5f ? 4f * t * t * t : 1f - (float) Math.pow(-2f * t + 2f, 3) / 2f;
-    }
-
-    private static float clamp(float v, float lo, float hi) {
-        return v < lo ? lo : v > hi ? hi : v;
-    }
 
     private static int wrapIdx(int i, int n) {
         return ((i % n) + n) % n;

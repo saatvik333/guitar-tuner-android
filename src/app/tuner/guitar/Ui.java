@@ -1,6 +1,8 @@
 package app.tuner.guitar;
 
-import android.graphics.RectF;
+import me.saatvik.hairline.Hits;
+import me.saatvik.hairline.Palette;
+import me.saatvik.hairline.SettingsPage;
 
 /** Everything the renderer needs for one frame. Written by TunerView, read by Renderer. */
 final class Ui {
@@ -10,7 +12,6 @@ final class Ui {
     int width, height, insetL, insetT, insetR, insetB;
 
     Palette pal = Palette.BUILT_IN[0];
-    String themeName = "";
     float pageT;                 // 0 = tuner, 1 = settings
 
     // dial
@@ -47,11 +48,17 @@ final class Ui {
     // bottom bar
     boolean toneOn, paused;
 
-    // settings page
-    String a4Label = "", tolLabel = "", needleLabel = "", namesLabel = "";
+    // settings page: each row's state; the animated positions of the sliding highlights and switches
+    String a4Label = "";
+    String[] tolOpts = {};
+    int tolIdx, needle, names;   // needle: index into Renderer.NEEDLES (1 = Fast); names: Renderer.NAMES (1 = Flats)
+    float tolPos, needlePos, namesPos;
+    boolean haptics, keepOn;
     float hapticsT, keepOnT;
-    float settingsScroll;        // px, written by TunerView
-    float settingsMaxScroll;     // px, written by Renderer
+    Palette[] themes = {};
+    int themeIdx;
+    /** Built by Renderer each frame it is drawn; scrolled by TunerView. */
+    final SettingsPage page = new SettingsPage();
 
     // strum check and suggestions on the dial
     boolean readCheck;           // all strings in tune: a check where the note goes
@@ -81,48 +88,6 @@ final class Ui {
     float gDoneT;                // completion mark
     float time;                  // seconds, for loops
 
-    // interaction
-    int pressedId;
-    int focusId;                 // keyboard focus, 0 = none
-
-    static final class Hit {
-        int id;
-        final RectF rect = new RectF();
-        float vx, vy, vr;        // press feedback: circle (vr > 0), pill (vr == 0), none (vr < 0)
-        float pw, ph;            // pill half width and height, centred on (vx, vy)
-    }
-
-    final Hit[] hits = new Hit[48];
-    int hitCount;
-
-    Ui() {
-        for (int i = 0; i < hits.length; i++) hits[i] = new Hit();
-    }
-
-    void resetHits() {
-        hitCount = 0;
-    }
-
-    void addHit(int id, float l, float t, float r, float b, float vx, float vy, float vr) {
-        if (hitCount >= hits.length) return;
-        Hit h = hits[hitCount++];
-        h.id = id;
-        h.rect.set(l, t, r, b);
-        h.vx = vx;
-        h.vy = vy;
-        h.vr = vr;
-        h.pw = h.ph = 0f;
-    }
-
-    int hitAt(float x, float y) {
-        for (int i = hitCount - 1; i >= 0; i--) {
-            if (hits[i].rect.contains(x, y)) return hits[i].id;
-        }
-        return 0;
-    }
-
-    Hit find(int id) {
-        for (int i = 0; i < hitCount; i++) if (hits[i].id == id) return hits[i];
-        return null;
-    }
+    // interaction: targets, written by Renderer each frame; pressed and focused by TunerView
+    final Hits hits = new Hits(48);
 }

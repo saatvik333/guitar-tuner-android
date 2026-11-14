@@ -57,17 +57,17 @@ mkdir -p "$OUT/flat" "$OUT/gen" "$OUT/classes" "$OUT/dex"
 python3 tools/make_icons.py res
 
 "$AAPT2" compile --dir res -o "$OUT/flat/res.zip"
+# Assets (the Rubik fonts) come from the hairline design system.
 "$AAPT2" link -I "$JAR" \
     --manifest AndroidManifest.xml \
-    -A assets \
-    --java "$OUT/gen" \
+    -A hairline/assets \
     --min-sdk-version 23 --target-sdk-version 36 \
     --version-code "$VERSION_CODE" --version-name "$VERSION_NAME" \
     -o "$OUT/res.apk" "$OUT/flat/res.zip"
 
 javac -nowarn -Xlint:-options -source 8 -target 8 -encoding UTF-8 \
     -bootclasspath "$JAR" -d "$OUT/classes" \
-    $(find src "$OUT/gen" -name '*.java')
+    $(find src hairline/src hairline/android "$OUT/gen" -name '*.java')
 
 "$D8" --min-api 23 --lib "$JAR" --release --output "$OUT/dex" $(find "$OUT/classes" -name '*.class')
 

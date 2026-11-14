@@ -1,8 +1,8 @@
 # Tuner
 
-Guitar tuner for Android in the same visual language as Level (Dustland "Clean One" grammar):
-flat colour, hairlines, single accent, circle motif, centred column, named themes switched from
-the header or by swiping sideways.
+Guitar tuner for Android in the Hairline design language it shares with Level (`hairline/`, see
+its DESIGN.md): flat colour, hairlines, single accent, circle motif, centred column, named themes
+chosen in Settings.
 
 ## Build
 
@@ -19,6 +19,10 @@ the keystore up. The version comes from `VERSION` (code = major x 10000 + minor 
 `VERSION_CODE` / `VERSION_NAME` override it. Google Play needs an .aab, which this script does not
 produce yet (needs `bundletool`).
 
+The design system lives in `hairline/`, a subtree of the Hairline library: `build.sh` compiles
+`hairline/src` and `hairline/android` with the app and links the Rubik fonts from
+`hairline/assets`. Update it with `git subtree pull --prefix=hairline <hairline repository> main --squash`.
+
 Backup carries the settings but not `device` prefs (whether the microphone was refused), which
 describe this phone only.
 
@@ -29,19 +33,25 @@ describe this phone only.
       Tracker.java       target note/string, smoothing, in-tune state (no Android deps)
       Tuning.java        tunings, note math
       Guide.java         what the guided page says: status and wording (no Android deps)
-      Renderer.java      all drawing, android.graphics only
-      TunerView.java     animation, input, haptics, accessibility; drains pitch frames on the UI thread
+      Renderer.java      the dial, the guide, the bottom bar and the settings rows, android.graphics only
+      Ui.java            the frame's state: written by TunerView, read by Renderer
+      TunerView.java     animation, input, haptics, what each control says to accessibility services;
+                         drains pitch frames on the UI thread
       AudioInput.java    AudioRecord capture thread
       ToneSynth.java     reference tone (holds ducking audio focus while it plays)
-      MainActivity.java  permission, lifecycle, window/insets, Material You palette on 12+
-      Palette.java       theme tokens: bg, fg, dim, line, accent, onAccent, plus derived accentText
-                         (4.5:1 on bg and the guide's row tint), accentStroke (3:1) and onAccentText
-    tools/preview/       AWT-backed android.graphics stubs: renders Renderer on the JVM; EngineTest, GuideTest
+      MainActivity.java  permission, lifecycle, settings storage
+      Settings.java      the saved settings
+    hairline/            the design system: Palette (tokens with derived contrast tokens), Kit
+                         (drawing primitives), SettingsPage, Hits, Motion, Access (virtual nodes,
+                         keyboard), Chrome (edge to edge, bars, insets, back, fonts), Themes (built-ins
+                         and Material You Wallpaper), Rubik, and the AWT stubs for the JVM preview
+    tools/preview/       Preview renders Renderer on the JVM; EngineTest, GuideTest
 
-    javac -d /tmp/pv $(find tools/preview -name '*.java') src/app/tuner/guitar/{Palette,Ui,Renderer,Tuning,PitchEngine,Tracker,StrumAnalyzer,Guide}.java
+    javac -d /tmp/pv $(find tools/preview hairline/preview hairline/src -name '*.java') \
+        src/app/tuner/guitar/{Ui,Renderer,Tuning,PitchEngine,Tracker,StrumAnalyzer,Guide}.java
     java -cp /tmp/pv app.tuner.guitar.EngineTest
     java -cp /tmp/pv app.tuner.guitar.GuideTest
-    java -Djava.awt.headless=true -cp /tmp/pv app.tuner.guitar.Preview assets/fonts /tmp/shots
+    java -Djava.awt.headless=true -cp /tmp/pv app.tuner.guitar.Preview hairline/assets/fonts /tmp/shots
 
 Capture runs from start to stop, so a visible split-screen pane keeps listening without focus.
 Rotation, dark mode, font size or process death restore the tab, settings page, pause, tuned
@@ -141,8 +151,29 @@ Two tabs under one bottom bar (settings, Advanced, reference tone, pause):
   while it is open; tapping it again, or Back, returns to Easy. Strings marked tuned in one tab
   stay marked in the other; Easy resumes at the first string not yet tuned.
 
-Settings slides over either tab and returns to it. On Easy the fork plays the current string's
-note ("Listen") and follows a tap on another string.
+Settings slides over either tab and returns to it; Back closes it. On Easy the fork plays the
+current string's note ("Listen") and follows a tap on another string.
+
+## Settings
+
+A list of rows split by hairlines, each with a short line saying what it does. Changes apply and
+save at once.
+
+- **Reference pitch**: A4 from 415 to 466 Hz, stepped with the chevrons either side of
+  "A4 = 440 Hz"; a finger or key held on one keeps stepping. Changing it clears the tuned marks.
+- **In-tune range**: ±1, ±2, ±3 or ±5 cents. Advanced uses it as set; Easy uses at least ±3.
+- **Needle**: Smooth or Fast (see Display).
+- **Note names**: Sharps or Flats, for the Chromatic tuning; the other tunings spell their strings
+  in their own key.
+- **Haptic feedback**: a tick on taps and a firmer buzz on reaching pitch.
+- **Keep screen on** (on by default): while listening or playing the reference tone, never on the
+  settings page.
+- **Theme**, last: Aurum, Ambra, Rosa, Celeste, Salvia, Notte, and Wallpaper (the system's Material
+  You colours) on Android 12+. Picking one cross-fades every colour, the system bars included.
+
+The option rows have a sliding highlight and the switches an animated thumb. In a narrow window
+or with large text the reference-pitch control moves under its label, and the list scrolls when
+it is taller than the window.
 
 ## Guided tuning (Easy)
 
@@ -185,7 +216,7 @@ For someone tuning for the first time.
   is wide); the sub-line; the meter's labels and second line of advice; the caption; the advice;
   the title; last, below ~260 dp, the Skip / Auto row, whose Next / Skip moves to the meter (a
   "Next string" / "Skip this string" action for TalkBack and the keyboard). While the height
-  shrinks, nothing given up comes back, except across the 420 dp switch to the tighter header.
+  shrinks, nothing given up comes back, except across the 420 dp switch to the tighter margins.
 
 `Preview` renders every guide state (`g*.png`); with a third argument it writes a scripted
 9.6 s run as PNG frames for motion review.
@@ -209,16 +240,20 @@ For someone tuning for the first time.
 - Reference tone: eight harmonics so a phone speaker conveys a low E; readings are ignored while
   it plays and for 350 ms after. It shows over Paused, ducks other audio while it plays, and ends
   on silence. Volume keys control media volume.
-- Keep screen on (default on) applies only while listening or playing the tone on the tuner page.
-- Short windows (split screen down to 220 dp): tighter header and bar, dial beside the tuning
+- Short windows (split screen down to 220 dp): tighter top and bottom margins, dial beside the tuning
   and strings, then the string row and tuning selector drop out before anything overlaps; a
   small dial shows note and cents only, and a microphone message takes the dial's place.
-- Accessibility: every control is a virtual node; the dial is a polite live region reading the
-  note, string and whole cents at most every 1.5 s; reaching pitch is announced. A microphone
-  message is a readable node (with its action, if any); silence starting and a refused
-  permission are announced. Contrast: text 4.5:1, indicators and focus ring 3:1 in every theme.
-  Text follows the system font scale up to 1.3x; larger settings render at 1.3x so the custom
-  layouts keep fitting. Keyboard and D-pad: arrows move focus spatially, Tab in reading order,
-  Enter or Space activates, Esc backs out.
+- Back: closes settings, stops the reference tone, or returns from Advanced to Easy; on Easy it
+  leaves the app. From Android 13 the app takes back only while one of those applies, so the
+  system's predictive back-to-home animation plays at the top level.
+- Accessibility: every control is a virtual node (hairline's `Access`) with a role and state:
+  settings options are radio buttons, the settings switches and the tone, pause, Advanced and Auto
+  switch buttons are switches. The dial (or the guide's meter) is a polite live region reading
+  the note, string and whole cents at most every 1.5 s; reaching pitch is announced. A microphone
+  message is a readable node (with its action, if any); silence starting and a refused permission
+  are announced. Contrast: text 4.5:1, indicators and focus ring 3:1 in every theme. Text follows
+  the system font scale up to 1.3x; larger settings render at 1.3x so the custom layouts keep
+  fitting. Keyboard and D-pad: arrows move focus spatially, Tab in reading order, Enter or Space
+  activates (held on a reference-pitch chevron, it repeats), Esc backs out.
 
-Rubik is bundled under the SIL Open Font License (assets/fonts/OFL.txt).
+Rubik is bundled under the SIL Open Font License (hairline/assets/fonts/OFL.txt).

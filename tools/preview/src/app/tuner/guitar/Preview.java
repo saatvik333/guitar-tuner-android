@@ -8,12 +8,22 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import javax.imageio.ImageIO;
 
+import me.saatvik.hairline.Palette;
+
 /**
- * Renders the production Renderer on the JVM (AWT-backed android.graphics stubs) for visual review:
- * a 412 x 914 dp phone, plus small windows (split screen, narrow phone at large font, landscape).
+ * Renders the production Renderer on the JVM (AWT-backed android.graphics stubs from
+ * hairline/preview) for visual review: a 412 x 914 dp phone, plus small windows (split screen,
+ * narrow phone at large font, landscape), the keyboard focus ring, and the settings page in every theme.
  */
 public final class Preview {
     static final float DENSITY = 2.625f;
+    /** The built-in themes and a Wallpaper theme as Android 12+ adds it (Material You's baseline colours). */
+    static final Palette[] THEMES = new Palette[Palette.BUILT_IN.length + 1];
+    static {
+        System.arraycopy(Palette.BUILT_IN, 0, THEMES, 0, Palette.BUILT_IN.length);
+        THEMES[THEMES.length - 1] = new Palette("Wallpaper", false, 0xFFFDF8FD, 0xFF1D1B20, 0xFF605D66,
+                0xFFE7E0EB, 0xFF6750A4, 0xFFFFFFFF);
+    }
 
     public static void main(String[] args) throws Exception {
         String fonts = args[0], out = args[1];
@@ -53,9 +63,16 @@ public final class Preview {
         u.caption = "Listening"; u.hint = "Play a string";
         shot(r, u, out + "/7_ambra_idle.png");
 
-        u = phone("Rosa", "Standard");
+        // settings, once per theme
+        for (Palette t : THEMES) {
+            u = phone(t.name, "Standard");
+            settings(u);
+            shot(r, u, out + "/8_settings_" + t.name.toLowerCase(java.util.Locale.US) + ".png");
+        }
+        u = phone("Aurum", "Standard");
         settings(u);
-        shot(r, u, out + "/8_rosa_settings.png");
+        u.needle = 1; u.needlePos = 0.45f; u.keepOn = false; u.keepOnT = 0.4f;     // highlight and switch mid-way
+        shot(r, u, out + "/8_settings_sliding.png");
 
         u = phone("Ambra", "Standard");
         u.noteT = 0f; u.letter = 'D'; u.octave = "3"; u.caption = "Reference tone"; u.freq = "146.83 Hz";
@@ -92,6 +109,10 @@ public final class Preview {
         u = sized("Rosa", "Standard", 360, 370, 2.625f, 1f, 24, 0);
         settings(u);
         shot(r, u, out + "/s3_split_settings.png");
+        u = sized("Notte", "Standard", 360, 370, 2.625f, 1f, 24, 0);
+        settings(u);
+        u.page.scroll = 1e9f;                              // clamped by the page to the bottom
+        shot(r, u, out + "/s5_split_settings_scrolled.png");
         u = sized("Salvia", "Standard", 360, 370, 2.625f, 1f, 24, 0);
         u.message = "Microphone access needed"; u.messageAction = "Allow";
         shot(r, u, out + "/s4_split_permission.png");
@@ -103,6 +124,10 @@ public final class Preview {
         u = sized("Rosa", "Standard", 320, 569, 2f, 1.3f, 24, 48);
         settings(u);
         shot(r, u, out + "/n2_narrow_settings.png");
+        u = sized("Celeste", "Standard", 320, 569, 2f, 1.3f, 24, 48);
+        settings(u);
+        u.page.scroll = 1e9f;
+        shot(r, u, out + "/n3_narrow_settings_scrolled.png");
 
         // short windows: split screen down to the 220 dp minimum
         int[][] shortSizes = {{412, 300, 24, 0}, {412, 260, 24, 0}, {412, 220, 0, 0}, {300, 260, 24, 48}};
@@ -116,15 +141,24 @@ public final class Preview {
         u.message = "Microphone access needed"; u.messageAction = "Allow";
         shot(r, u, out + "/w_412x260_permission.png");
 
-        // keyboard focus ring
+        // keyboard focus ring: a string, a chevron, a segmented option, a stepper half
         u = phone("Notte", "Standard");
         live(u, 'D', 0, "3", -3f, "String 4", "Tune up", "146.58 Hz");
         u.sTargetT[2] = 1f;
-        shot(r, u, null);
-        u.focusId = Renderer.H_STRING + 2;
+        u.hits.focused = Renderer.H_STRING + 2;
         shot(r, u, out + "/k1_focus_string.png");
-        u.focusId = Renderer.H_TUNING_NEXT;
+        u.hits.focused = Renderer.H_TUNING_NEXT;
         shot(r, u, out + "/k2_focus_tuning.png");
+        u = phone("Salvia", "Standard");
+        settings(u);
+        u.hits.focused = Renderer.H_TOL + 2;
+        shot(r, u, out + "/k3_focus_option.png");
+        u.hits.focused = Renderer.H_A4 + 1;
+        shot(r, u, out + "/k4_focus_stepper.png");
+
+        u = sized("Ambra", "Standard", 914, 412, 2.625f, 1f, 24, 24);
+        settings(u);
+        shot(r, u, out + "/l2_landscape_settings.png");
 
         u = sides(sized("Aurum", "Standard", 914, 412, 2.625f, 1f, 24, 0), 32, 48);   // cutout left, buttons right
         live(u, 'D', 0, "3", 4.6f, "String 4", "Tune down", "147.22 Hz");
@@ -406,8 +440,10 @@ public final class Preview {
 
     static void settings(Ui u) {
         u.pageT = 1f;
-        u.a4Label = "A4 = 440 Hz"; u.tolLabel = "± 2 ¢"; u.needleLabel = "Smooth"; u.namesLabel = "Sharps";
-        u.hapticsT = 1f; u.keepOnT = 1f;
+        u.a4Label = "A4 = 440 Hz";
+        u.tolOpts = new String[]{"±1 ¢", "±2 ¢", "±3 ¢", "±5 ¢"};
+        u.tolIdx = 1; u.tolPos = 1f;
+        u.haptics = true; u.hapticsT = 1f; u.keepOn = true; u.keepOnT = 1f;
     }
 
     static Ui phone(String theme, String tuning) {
@@ -422,8 +458,8 @@ public final class Preview {
         u.height = Math.round(hDp * density);
         u.insetT = Math.round(topDp * density);
         u.insetB = Math.round(bottomDp * density);
-        for (Palette p : Palette.BUILT_IN) if (p.name.equals(theme)) u.pal = p;
-        u.themeName = theme;
+        for (int i = 0; i < THEMES.length; i++) if (THEMES[i].name.equals(theme)) { u.pal = THEMES[i]; u.themeIdx = i; }
+        u.themes = THEMES;
         Tuning t = Tuning.ALL[Tuning.indexOf(tuning)];
         u.tuningName = t.name;
         u.stringsT = t.chromatic() ? 0f : 1f;
@@ -447,16 +483,15 @@ public final class Preview {
         BufferedImage img = new BufferedImage(u.width, u.height, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = img.createGraphics();
         r.draw(new Canvas(g, u.width, u.height), u);
-        if (u.settingsScroll > u.settingsMaxScroll) {
-            u.settingsScroll = u.settingsMaxScroll;
-            r.draw(new Canvas(g, u.width, u.height), u);
-        }
-        if (Boolean.getBoolean("hits")) g.setColor(new java.awt.Color(255, 0, 0, 90));
-        for (int i = 0; Boolean.getBoolean("hits") && i < u.hitCount; i++) {
-            android.graphics.RectF h = u.hits[i].rect;
-            g.drawRect(Math.round(h.left), Math.round(h.top), Math.round(h.right - h.left), Math.round(h.bottom - h.top));
+        // -Dhits=true outlines the hit rectangles, for checking overlap and reach
+        if (Boolean.getBoolean("hits")) {
+            g.setColor(new java.awt.Color(255, 0, 0, 90));
+            for (int i = 0; i < u.hits.count; i++) {
+                android.graphics.RectF h = u.hits.hits[i].rect;
+                g.drawRect(Math.round(h.left), Math.round(h.top), Math.round(h.right - h.left), Math.round(h.bottom - h.top));
+            }
         }
         g.dispose();
-        if (path != null) ImageIO.write(img, "png", new File(path));
+        ImageIO.write(img, "png", new File(path));
     }
 }
